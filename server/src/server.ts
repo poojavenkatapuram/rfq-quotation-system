@@ -11,6 +11,8 @@ import authRoutes from "./routes/auth.routes.js";
 import customerRoutes from "./routes/customer.routes.js";
 import rfqRoutes from "./routes/rfq.routes.js";
 import materialRateRoutes from "./routes/material-rate.routes.js";
+import machineRateRoutes from "./routes/machine-rate.routes.js";
+import costingRoutes from "./routes/costing.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
@@ -63,6 +65,8 @@ app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/rfqs", rfqRoutes);
 app.use("/api/material-rates", materialRateRoutes);
+app.use("/api/machine-rates", machineRateRoutes);
+app.use("/api/costings", costingRoutes);
 
 // Handle unknown API routes
 app.use((_req, res) => {
