@@ -10,6 +10,7 @@ import prisma from "./lib/prisma.js";
 import authRoutes from "./routes/auth.routes.js";
 import customerRoutes from "./routes/customer.routes.js";
 import rfqRoutes from "./routes/rfq.routes.js";
+import materialRateRoutes from "./routes/material-rate.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
@@ -61,6 +62,7 @@ app.get("/api/health/database", async (_req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/rfqs", rfqRoutes);
+app.use("/api/material-rates", materialRateRoutes);
 
 // Handle unknown API routes
 app.use((_req, res) => {
