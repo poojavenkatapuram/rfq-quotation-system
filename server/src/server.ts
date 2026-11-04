@@ -1,29 +1,36 @@
+import dotenv from "dotenv";
+dotenv.config();
 
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import dotenv from "dotenv";
 import prisma from "./lib/prisma.js";
 
-dotenv.config();
+import authRoutes from "./routes/auth.routes.js";
+import customerRoutes from "./routes/customer.routes.js";
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = Number(process.env.PORT) || 5000;
 
-// Security and middleware
+const allowedOrigin =
+  process.env.CLIENT_URL || "http://localhost:5173";
+
+// Security and request middleware
 app.use(helmet());
 
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: allowedOrigin,
+    credentials: true,
   })
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-// API health check
+// Health check
 app.get("/api/health", (_req, res) => {
-  res.status(200).json({
+  return res.status(200).json({
     success: true,
     message: "RFQ Quotation API is running",
   });
@@ -34,23 +41,35 @@ app.get("/api/health/database", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: "PostgreSQL connection successful",
+      message: "Database connection successful",
     });
   } catch (error) {
     console.error("Database health check failed:", error);
 
-    res.status(500).json({
+    return res.status(503).json({
       success: false,
       message: "Database connection failed",
     });
   }
 });
 
+// API routes
+app.use("/api/auth", authRoutes);
+app.use("/api/customers", customerRoutes);
+
+// Handle unknown API routes
+app.use((_req, res) => {
+  return res.status(404).json({
+    success: false,
+    message: "API endpoint not found",
+  });
+});
+
 // Start server
 const server = app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
 
 // Graceful shutdown
@@ -59,6 +78,7 @@ const shutdown = async () => {
 
   server.close(async () => {
     await prisma.$disconnect();
+    console.log("Database disconnected");
     process.exit(0);
   });
 };
