@@ -22,6 +22,7 @@ import RFQRegister from './components/rfq/RFQRegister'
 import Costing from './components/costing/Costing'
 import Quotation from './components/quotations/Quotation'
 import Dashboard from './components/dashboard/Dashboard'
+import HistoryPage from './components/history/History'
 import Login from './components/auth/Login'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import UserManagement from './components/users/UserManagement'
@@ -215,6 +216,8 @@ function AppContent() {
             <Costing />
           ) : activePage === 'Quotations' ? (
             <Quotation />
+          ) : activePage === 'History' ? (
+            <HistoryPage />
           ) : activePage === 'Rate Masters' ? (
             <RateMasters />
           ) : activePage === 'Users & Roles' && user?.role === 'ADMIN' ? (

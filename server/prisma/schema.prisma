@@ -404,3 +404,47 @@ model AuditLog {
   @@index([actorId])
   @@index([createdAt])
 }
+
+model HistoricalQuote {
+  id              String    @id @default(cuid())
+  quotationNumber String
+  rfqNumber       String?
+  customerName    String
+  quoteDate       DateTime?
+  validUntil      DateTime?
+  status          String?
+  currency        String    @default("INR")
+  subtotal        Decimal?  @db.Decimal(14, 2)
+  gstPercentage   Decimal?  @db.Decimal(8, 4)
+  gstAmount       Decimal?  @db.Decimal(14, 2)
+  grandTotal      Decimal?  @db.Decimal(14, 2)
+  notes           String?
+  sourceFile      String
+  importedById    String
+  createdAt       DateTime  @default(now())
+
+  parts HistoricalQuotePart[]
+
+  @@unique([quotationNumber, customerName])
+  @@index([customerName])
+  @@index([rfqNumber])
+  @@index([quoteDate])
+}
+
+model HistoricalQuotePart {
+  id                String   @id @default(cuid())
+  historicalQuoteId String
+  partNumber        String?
+  partName          String
+  materialGrade     String?
+  quantity          Int?
+  unitPrice         Decimal? @db.Decimal(14, 2)
+  totalPrice        Decimal? @db.Decimal(14, 2)
+  costingSnapshot   Json?
+
+  historicalQuote HistoricalQuote @relation(fields: [historicalQuoteId], references: [id], onDelete: Cascade)
+
+  @@index([partNumber])
+  @@index([partName])
+  @@index([materialGrade])
+}
