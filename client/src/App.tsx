@@ -25,6 +25,7 @@ import Dashboard from './components/dashboard/Dashboard'
 import Login from './components/auth/Login'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import UserManagement from './components/users/UserManagement'
+import RateMasters from './components/rates/RateMasters'
 
 const navigation: { label: string; icon: LucideIcon }[] = [
   { label: 'Dashboard', icon: LayoutDashboard },
@@ -124,8 +125,8 @@ function AppContent() {
         <nav className="navigation">
           {user.role === 'ADMIN' && (
             <button
-              className={`nav-item ${activePage === 'Users' ? 'nav-active' : ''}`}
-              onClick={() => navigate('Users')}
+              className={`nav-item ${activePage === 'Users & Roles' ? 'nav-active' : ''}`}
+              onClick={() => navigate('Users & Roles')}
             >
               <Users size={19} />
               <span>Users & Roles</span>
@@ -214,6 +215,8 @@ function AppContent() {
             <Costing />
           ) : activePage === 'Quotations' ? (
             <Quotation />
+          ) : activePage === 'Rate Masters' ? (
+            <RateMasters />
           ) : activePage === 'Users & Roles' && user?.role === 'ADMIN' ? (
             <UserManagement />
           ) : (
