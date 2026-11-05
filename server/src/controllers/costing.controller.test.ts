@@ -71,6 +71,7 @@ const partFixture = {
         sequence: 1,
         operationName: "Turning",
         cycleTimeMin: 3.2,
+        setupTimeMin: 10,
         machineRate: {
           id: machineRateId,
           machineCode: "CNC-01",
@@ -271,10 +272,11 @@ describe("createCosting", () => {
 
     expect(createCall.data.partId).toBe(partId);
     expect(createCall.data.materialRateId).toBe(materialRateId);
+    expect(createCall.data.materialRatePerKgSnapshot).toBe(85);
     expect(createCall.data.createdById).toBe(userId);
     expect(createCall.data.idempotencyKey).toBe(idempotencyKey);
     expect(createCall.data.version).toBe(1);
-    expect(createCall.data.components.create).toHaveLength(6);
+    expect(createCall.data.components.create).toHaveLength(7);
     expect(createCall.data.volumes.create).toHaveLength(2);
 
     const machiningComponent = createCall.data.components.create.find(
@@ -284,6 +286,21 @@ describe("createCosting", () => {
     expect(machiningComponent.machineRateId).toBe(machineRateId);
     expect(machiningComponent.cycleTimeMin).toBe(3.2);
     expect(machiningComponent.ratePerHourSnapshot).toBe(850);
+
+    const setupComponent = createCall.data.components.create.find(
+      (component: any) => component.type === "SETUP"
+    );
+
+    expect(setupComponent.amount).toBeCloseTo(141.67, 2);
+    expect(setupComponent.setupTimeMinSnapshot).toBe(10);
+    expect(setupComponent.ratePerHourSnapshot).toBe(850);
+
+    expect(createCall.data.volumes.create[0].unitPrice).toBeGreaterThan(
+      createCall.data.volumes.create[1].unitPrice
+    );
+    expect(createCall.data.volumes.create[0].totalCost).toBe(
+      createCall.data.volumes.create[0].unitPrice * 1000
+    );
   });
 
   it("increments the costing version", async () => {

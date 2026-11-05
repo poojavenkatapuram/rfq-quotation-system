@@ -6,6 +6,8 @@ const validInput = {
   materialRatePerKg: 85,
   cycleTimeMin: 3.2,
   machineRatePerHour: 850,
+  setupCost: 600,
+  annualVolumes: [1000, 5000],
   scrapPercentage: 5,
   overheadAmount: 10,
   packingAmount: 5,
@@ -38,10 +40,15 @@ describe("calculateCosting", () => {
     expect(result.totalCost).toBe(122.78);
   });
 
-  it("calculates selling price using gross profit margin", () => {
+  it("calculates volume-specific selling prices and allocates setup cost", () => {
     const result = calculateCosting(validInput);
 
-    expect(result.unitSellingPrice).toBe(153.47);
+    expect(result.volumeResults).toHaveLength(2);
+    expect(result.volumeResults[0].setupCostPerPart).toBe(0.6);
+    expect(result.volumeResults[1].setupCostPerPart).toBe(0.12);
+    expect(result.volumeResults[0].unitSellingPrice).toBeGreaterThan(
+      result.volumeResults[1].unitSellingPrice
+    );
   });
 
   it("rejects zero gross weight", () => {

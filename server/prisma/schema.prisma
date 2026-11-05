@@ -49,6 +49,7 @@ enum ExtractionStatus {
 enum CostComponentType {
   MATERIAL
   MACHINING
+  SETUP
   SCRAP
   OVERHEAD
   PACKING
@@ -215,21 +216,22 @@ model RoutingOperation {
 }
 
 model Costing {
-  id              String   @id @default(cuid())
-  partId          String
-  materialRateId  String?
-  createdById     String
-  idempotencyKey  String?  @unique
-  version         Int      @default(1)
-  grossWeightKg   Decimal  @db.Decimal(12, 4)
-  scrapPercentage Decimal  @default(0) @db.Decimal(8, 4)
-  overheadAmount  Decimal  @default(0) @db.Decimal(14, 2)
-  packingAmount   Decimal  @default(0) @db.Decimal(14, 2)
-  freightAmount   Decimal  @default(0) @db.Decimal(14, 2)
-  profitMargin    Decimal  @default(0) @db.Decimal(8, 4)
-  totalCost       Decimal  @db.Decimal(14, 2)
-  assumptions     String?
-  createdAt       DateTime @default(now())
+  id                        String   @id @default(cuid())
+  partId                    String
+  materialRateId            String?
+  materialRatePerKgSnapshot Decimal? @db.Decimal(12, 2)
+  createdById               String
+  idempotencyKey            String?  @unique
+  version                   Int      @default(1)
+  grossWeightKg             Decimal  @db.Decimal(12, 4)
+  scrapPercentage           Decimal  @default(0) @db.Decimal(8, 4)
+  overheadAmount            Decimal  @default(0) @db.Decimal(14, 2)
+  packingAmount             Decimal  @default(0) @db.Decimal(14, 2)
+  freightAmount             Decimal  @default(0) @db.Decimal(14, 2)
+  profitMargin              Decimal  @default(0) @db.Decimal(8, 4)
+  totalCost                 Decimal  @db.Decimal(14, 2)
+  assumptions               String?
+  createdAt                 DateTime @default(now())
 
   part           Part            @relation(fields: [partId], references: [id], onDelete: Cascade)
   materialRate   MaterialRate?   @relation(fields: [materialRateId], references: [id])
@@ -239,7 +241,6 @@ model Costing {
   quotationParts QuotationPart[]
 
   @@unique([partId, version])
-
 }
 
 model CostingVolume {
@@ -256,15 +257,16 @@ model CostingVolume {
 }
 
 model CostComponent {
-  id                  String            @id @default(cuid())
-  costingId           String
-  type                CostComponentType
-  name                String
-  amount              Decimal           @db.Decimal(14, 2)
-  description         String?
-  machineRateId       String?
-  cycleTimeMin        Decimal?          @db.Decimal(12, 4)
-  ratePerHourSnapshot Decimal?          @db.Decimal(12, 2)
+  id                   String            @id @default(cuid())
+  costingId            String
+  type                 CostComponentType
+  name                 String
+  amount               Decimal           @db.Decimal(14, 2)
+  description          String?
+  machineRateId        String?
+  cycleTimeMin         Decimal?          @db.Decimal(12, 4)
+  setupTimeMinSnapshot Decimal?          @db.Decimal(12, 4)
+  ratePerHourSnapshot  Decimal?          @db.Decimal(12, 2)
 
   costing     Costing      @relation(fields: [costingId], references: [id], onDelete: Cascade)
   machineRate MachineRate? @relation(fields: [machineRateId], references: [id])

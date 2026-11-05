@@ -3,23 +3,34 @@ export interface CostingInput {
   materialRatePerKg: number;
   cycleTimeMin: number;
   machineRatePerHour: number;
+  setupCost: number;
   scrapPercentage: number;
   overheadAmount: number;
   packingAmount: number;
   freightAmount: number;
   profitMargin: number;
+  annualVolumes: number[];
+}
+
+export interface VolumeCostingResult {
+  annualVolume: number;
+  setupCostPerPart: number;
+  unitCost: number;
+  unitSellingPrice: number;
+  annualValue: number;
 }
 
 export interface CostingResult {
   materialCost: number;
   machiningCost: number;
+  setupCost: number;
   scrapCost: number;
   overheadAmount: number;
   packingAmount: number;
   freightAmount: number;
   totalCost: number;
   profitMargin: number;
-  unitSellingPrice: number;
+  volumeResults: VolumeCostingResult[];
 }
 
 function roundMoney(value: number): number {
@@ -27,9 +38,22 @@ function roundMoney(value: number): number {
 }
 
 function validateInput(input: CostingInput): void {
-  const values = Object.entries(input);
+  const numericFields = [
+    "grossWeightKg",
+    "materialRatePerKg",
+    "cycleTimeMin",
+    "machineRatePerHour",
+    "setupCost",
+    "scrapPercentage",
+    "overheadAmount",
+    "packingAmount",
+    "freightAmount",
+    "profitMargin",
+  ] as const;
 
-  for (const [field, value] of values) {
+  for (const field of numericFields) {
+    const value = input[field];
+
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new Error(`${field} must be a valid number`);
     }
@@ -62,18 +86,35 @@ function validateInput(input: CostingInput): void {
   if (input.profitMargin >= 100) {
     throw new Error("profitMargin must be less than 100");
   }
+
+  if (
+    !Array.isArray(input.annualVolumes) ||
+    input.annualVolumes.length === 0 ||
+    input.annualVolumes.length > 5
+  ) {
+    throw new Error("Enter between one and five annual volumes");
+  }
+
+  for (const volume of input.annualVolumes) {
+    if (!Number.isInteger(volume) || volume <= 0) {
+      throw new Error("Annual volumes must be positive integers");
+    }
+  }
 }
 
 export function calculateCosting(input: CostingInput): CostingResult {
   validateInput(input);
 
-  const materialCost = input.grossWeightKg * input.materialRatePerKg;
+  const materialCost =
+    input.grossWeightKg * input.materialRatePerKg;
 
   const machiningCost =
     (input.cycleTimeMin / 60) * input.machineRatePerHour;
 
-  const scrapCost = materialCost * (input.scrapPercentage / 100);
+  const scrapCost =
+    materialCost * (input.scrapPercentage / 100);
 
+  // Recurring cost for manufacturing one finished part.
   const totalCost =
     materialCost +
     machiningCost +
@@ -82,18 +123,43 @@ export function calculateCosting(input: CostingInput): CostingResult {
     input.packingAmount +
     input.freightAmount;
 
-  const unitSellingPrice =
-    totalCost / (1 - input.profitMargin / 100);
+  // Setup is a batch-level cost, allocated over the selected volume.
+  const volumeResults = [...new Set(input.annualVolumes)].map(
+    (annualVolume): VolumeCostingResult => {
+      const setupCostPerPart =
+        input.setupCost / annualVolume;
+
+      const unitCost =
+        totalCost + setupCostPerPart;
+
+      const unitSellingPrice =
+        unitCost / (1 - input.profitMargin / 100);
+
+      const roundedUnitSellingPrice =
+        roundMoney(unitSellingPrice);
+
+      return {
+        annualVolume,
+        setupCostPerPart: roundMoney(setupCostPerPart),
+        unitCost: roundMoney(unitCost),
+        unitSellingPrice: roundedUnitSellingPrice,
+        annualValue: roundMoney(
+          roundedUnitSellingPrice * annualVolume,
+        ),
+      };
+    },
+  );
 
   return {
     materialCost: roundMoney(materialCost),
     machiningCost: roundMoney(machiningCost),
+    setupCost: roundMoney(input.setupCost),
     scrapCost: roundMoney(scrapCost),
     overheadAmount: roundMoney(input.overheadAmount),
     packingAmount: roundMoney(input.packingAmount),
     freightAmount: roundMoney(input.freightAmount),
     totalCost: roundMoney(totalCost),
     profitMargin: input.profitMargin,
-    unitSellingPrice: roundMoney(unitSellingPrice),
+    volumeResults,
   };
 }

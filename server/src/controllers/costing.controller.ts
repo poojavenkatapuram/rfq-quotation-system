@@ -165,6 +165,7 @@ export const createCosting = async (
 
       let totalCycleTimeMin = 0;
       let totalMachiningCost = 0;
+      let totalSetupCost = 0;
 
       const machineComponents: {
         name: string;
@@ -173,6 +174,8 @@ export const createCosting = async (
         machineRateId: string;
         cycleTimeMin: number;
         ratePerHourSnapshot: number;
+        setupTimeMin: number;
+        setupCost: number;
       }[] = [];
 
       for (const operation of operations) {
@@ -193,8 +196,13 @@ export const createCosting = async (
         const operationCost =
           (cycleTimeMin / 60) * machineRatePerHour;
 
+        const setupTimeMin = Number(operation.setupTimeMin ?? 0);
+        const operationSetupCost =
+          (setupTimeMin / 60) * machineRatePerHour;
+
         totalCycleTimeMin += cycleTimeMin;
         totalMachiningCost += operationCost;
+        totalSetupCost += operationSetupCost;
 
         machineComponents.push({
           name: operation.operationName,
@@ -207,6 +215,8 @@ export const createCosting = async (
           machineRateId: operation.machineRate.id,
           cycleTimeMin,
           ratePerHourSnapshot: machineRatePerHour,
+          setupTimeMin,
+          setupCost: operationSetupCost,
         });
       }
 
@@ -218,6 +228,8 @@ export const createCosting = async (
         materialRatePerKg: Number(part.materialRate.ratePerKg),
         cycleTimeMin: totalCycleTimeMin,
         machineRatePerHour: effectiveMachineRate,
+        setupCost: totalSetupCost,
+        annualVolumes: uniqueVolumes,
         scrapPercentage,
         overheadAmount,
         packingAmount,
@@ -252,6 +264,20 @@ export const createCosting = async (
           cycleTimeMin: component.cycleTimeMin,
           ratePerHourSnapshot: component.ratePerHourSnapshot,
         })),
+        ...machineComponents
+          .filter((component) => component.setupTimeMin > 0)
+          .map((component) => ({
+            type: "SETUP" as const,
+            name: `${component.name} setup`,
+            amount: component.setupCost,
+            description:
+              `Setup time: ${component.setupTimeMin} minutes; ` +
+              `Rate: ${component.ratePerHourSnapshot}/hour; ` +
+              `Machine rate ID: ${component.machineRateId}`,
+            machineRateId: component.machineRateId,
+            setupTimeMinSnapshot: component.setupTimeMin,
+            ratePerHourSnapshot: component.ratePerHourSnapshot,
+          })),
         {
           type: "SCRAP" as const,
           name: "Material scrap",
@@ -282,6 +308,7 @@ export const createCosting = async (
         data: {
           partId,
           materialRateId: part.materialRate.id,
+          materialRatePerKgSnapshot: Number(part.materialRate.ratePerKg),
           createdById: userId,
           idempotencyKey,
           version,
@@ -297,10 +324,10 @@ export const createCosting = async (
             create: components,
           },
           volumes: {
-            create: uniqueVolumes.map((annualVolume) => ({
-              annualVolume,
-              unitPrice: costing.unitSellingPrice,
-              totalCost: costing.unitSellingPrice * annualVolume,
+            create: costing.volumeResults.map((volume) => ({
+              annualVolume: volume.annualVolume,
+              unitPrice: volume.unitSellingPrice,
+              totalCost: volume.annualValue,
             })),
           },
         },
@@ -320,7 +347,12 @@ export const createCosting = async (
             partId,
             version,
             totalCost: costing.totalCost,
-            unitSellingPrice: costing.unitSellingPrice,
+            setupCost: costing.setupCost,
+            volumeResults: costing.volumeResults.map((volume) => ({
+              annualVolume: volume.annualVolume,
+              unitSellingPrice: volume.unitSellingPrice,
+              annualValue: volume.annualValue,
+            })),
           },
         },
       });
