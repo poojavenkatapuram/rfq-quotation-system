@@ -157,7 +157,7 @@ export default function History() {
                     <td>{date(record.createdAt)}</td>
                   </>}
                   {activeTab === 'costings' && <>
-                    <td>{record.part?.partName || '—'}</td>
+                    <td>{record.part?.name || '—'}</td>
                     <td>{record.part?.rfq?.rfqNumber || '—'}</td>
                     <td>v{record.version}</td>
                     <td>{record.part?.materialGrade || '—'}</td>
@@ -208,10 +208,10 @@ export default function History() {
       {importResult && (
         <div className="history-import-result">
           <h3>Import completed</h3>
-          <p>Valid quotations: {importResult.totalValidQuotations ?? 0}</p>
-          <p>Imported: {importResult.imported ?? 0}</p>
-          <p>Skipped: {importResult.skipped ?? 0}</p>
-          <p>Invalid rows: {importResult.invalidRows ?? 0}</p>
+          <p>Valid quotations: {importResult.summary?.totalValidQuotations ?? 0}</p>
+          <p>Imported: {importResult.summary?.imported ?? 0}</p>
+          <p>Skipped: {importResult.summary?.skipped ?? 0}</p>
+          <p>Invalid rows: {importResult.summary?.invalidRows ?? 0}</p>
         </div>
       )}
 
@@ -221,7 +221,80 @@ export default function History() {
             <h2>Record details</h2>
             <button onClick={() => setSelected(null)}>Close</button>
           </div>
-          <pre>{JSON.stringify(selected, null, 2)}</pre>
+
+          {activeTab === 'quotations' && (
+            <div className="history-detail-grid">
+              <div><label>Quotation number</label><strong>{selected.quotationNumber || '—'}</strong></div>
+              <div><label>Customer</label><strong>{selected.customer?.name || '—'}</strong></div>
+              <div><label>RFQ number</label><strong>{selected.rfq?.rfqNumber || '—'}</strong></div>
+              <div><label>Status</label><strong>{selected.status || '—'}</strong></div>
+              <div><label>Subtotal</label><strong>{money(selected.subtotal)}</strong></div>
+              <div><label>GST</label><strong>{money(selected.gstAmount)}</strong></div>
+              <div><label>Grand total</label><strong>{money(selected.grandTotal)}</strong></div>
+              <div><label>Created</label><strong>{date(selected.createdAt)}</strong></div>
+              <h3>Quoted parts</h3>
+              {(selected.parts || []).map((part: RecordItem) => (
+                <div className="history-detail-part" key={part.id}>
+                  <strong>{part.part?.name || part.partName || 'Part'}</strong>
+                  <span>Quantity: {part.quantity ?? '—'}</span>
+                  <span>Unit price: {money(part.unitPrice)}</span>
+                  <span>Total: {money(part.totalPrice)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {activeTab === 'costings' && (
+            <div className="history-detail-grid">
+              <div><label>Part</label><strong>{selected.part?.name || '—'}</strong></div>
+              <div><label>Part number</label><strong>{selected.part?.partNumber || '—'}</strong></div>
+              <div><label>RFQ</label><strong>{selected.part?.rfq?.rfqNumber || '—'}</strong></div>
+              <div><label>Material</label><strong>{selected.part?.materialGrade || '—'}</strong></div>
+              <div><label>Version</label><strong>v{selected.version}</strong></div>
+              <div><label>Created</label><strong>{date(selected.createdAt)}</strong></div>
+              <h3>Volume pricing</h3>
+              {(selected.volumes || []).map((volume: RecordItem) => (
+                <div className="history-detail-part" key={volume.id}>
+                  <strong>Annual volume: {Number(volume.annualVolume || 0).toLocaleString('en-IN')}</strong>
+                  <span>Unit price: {money(volume.unitPrice)}</span>
+                  <span>Annual value: {money(volume.totalCost)}</span>
+                </div>
+              ))}
+              <h3>Cost components</h3>
+              {(selected.components || []).map((component: RecordItem) => (
+                <div className="history-detail-part" key={component.id}>
+                  <strong>{String(component.type || 'Cost').replaceAll('_', ' ')}</strong>
+                  <span>Amount: {money(component.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {activeTab === 'imported' && (
+            <div className="history-detail-grid">
+              <div><label>Quotation number</label><strong>{selected.quotationNumber}</strong></div>
+              <div><label>Customer</label><strong>{selected.customerName}</strong></div>
+              <div><label>RFQ number</label><strong>{selected.rfqNumber || '—'}</strong></div>
+              <div><label>Status</label><strong>{selected.status || '—'}</strong></div>
+              <div><label>Quote date</label><strong>{date(selected.quoteDate)}</strong></div>
+              <div><label>Valid until</label><strong>{date(selected.validUntil)}</strong></div>
+              <div><label>Subtotal</label><strong>{money(selected.subtotal)}</strong></div>
+              <div><label>GST</label><strong>{money(selected.gstAmount)}</strong></div>
+              <div><label>Grand total</label><strong>{money(selected.grandTotal)}</strong></div>
+              <div><label>Source file</label><strong>{selected.sourceFile || '—'}</strong></div>
+              <h3>Imported parts</h3>
+              {(selected.parts || []).map((part: RecordItem) => (
+                <div className="history-detail-part" key={part.id}>
+                  <strong>{part.partName}</strong>
+                  <span>Part number: {part.partNumber || '—'}</span>
+                  <span>Material: {part.materialGrade || '—'}</span>
+                  <span>Quantity: {part.quantity ?? '—'}</span>
+                  <span>Unit price: {money(part.unitPrice)}</span>
+                  <span>Total: {money(part.totalPrice)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
