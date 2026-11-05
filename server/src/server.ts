@@ -16,6 +16,7 @@ import costingRoutes from "./routes/costing.routes.js";
 import routingRoutes from "./routes/routing.routes.js";
 import quotationRoutes from "./routes/quotation.routes.js";
 import partRoutes from "./routes/part.routes.js";
+import dashboardRoutes from "./routes/dashboard.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
@@ -75,6 +76,7 @@ app.use("/api/machine-rates", machineRateRoutes);
 app.use("/api/routings", routingRoutes);
 app.use("/api/costings", costingRoutes);
 app.use("/api/quotations", quotationRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 
 // Handle unknown API routes
 app.use((_req, res) => {
