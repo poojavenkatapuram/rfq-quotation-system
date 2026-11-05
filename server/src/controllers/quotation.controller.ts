@@ -3,6 +3,7 @@ import { Prisma, QuotationStatus, ApprovalStatus } from "@prisma/client";
 import { z } from "zod";
 
 import prisma from "../lib/prisma.js";
+import { generateQuotationPdf } from "../services/quotation-pdf.service.js";
 import type { AuthenticatedRequest } from "../middleware/auth.middleware.js";
 
 const APPROVAL_THRESHOLD = 2500000;
@@ -39,6 +40,7 @@ const isUniqueConstraintError = (error: unknown): boolean =>
   error.code === "P2002";
 
 const quotationInclude = {
+  rfq: { select: { rfqNumber: true } },
   customer: true,
   createdBy: {
     select: { id: true, name: true, email: true },
@@ -965,6 +967,68 @@ export const sendQuotation = async (
     return res.status(500).json({
       success: false,
       message: "Unable to send quotation",
+    });
+  }
+};
+
+// --------------------------------------------------
+// Generate approved quotation PDF
+// --------------------------------------------------
+
+export const downloadQuotationPdf = async (
+  req: Request,
+  res: Response
+) => {
+  try {
+    const quotationId = req.params.id;
+
+    if (typeof quotationId !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid quotation ID",
+      });
+    }
+
+    const quotation = await prisma.quotation.findUnique({
+      where: { id: quotationId },
+      include: quotationInclude,
+    });
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found",
+      });
+    }
+
+    if (
+      quotation.status !== QuotationStatus.APPROVED &&
+      quotation.status !== QuotationStatus.SENT
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "PDF is available only for approved or sent quotations",
+      });
+    }
+
+    const pdf = await generateQuotationPdf(quotation);
+
+    const filename = `${quotation.quotationNumber}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`
+    );
+    res.setHeader("Content-Length", pdf.length);
+
+    return res.status(200).send(pdf);
+  } catch (error) {
+    console.error("Generate quotation PDF error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to generate quotation PDF",
     });
   }
 };

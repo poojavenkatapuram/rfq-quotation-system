@@ -14,6 +14,7 @@ const { prismaMock, txMock } = vi.hoisted(() => {
   return {
     txMock: tx,
     prismaMock: {
+      quotation: { findUnique: vi.fn() },
       $transaction: vi.fn(),
     },
   };
@@ -23,7 +24,7 @@ vi.mock("../lib/prisma.js", () => ({
   default: prismaMock,
 }));
 
-import { createQuotation, submitQuotation, approveQuotation, rejectQuotation, sendQuotation } from "./quotation.controller.js";
+import { createQuotation, submitQuotation, approveQuotation, rejectQuotation, sendQuotation, downloadQuotationPdf } from "./quotation.controller.js";
 
 const userId = "user-123";
 const rfqId = "rfq-123";
@@ -76,6 +77,8 @@ function mockResponse() {
   const res = {
     status: vi.fn(),
     json: vi.fn(),
+    setHeader: vi.fn(),
+    send: vi.fn(),
   };
 
   res.status.mockReturnValue(res);
@@ -781,5 +784,84 @@ describe("sendQuotation", () => {
 
     expect(res.status).toHaveBeenCalledWith(404);
     expect(txMock.quotation.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("downloadQuotationPdf", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const pdfQuotation = {
+    quotationNumber: "QUO-TEST-123",
+    status: "APPROVED",
+    createdAt: new Date("2026-11-05"),
+    validUntil: new Date("2026-12-05"),
+    gstPercentage: 18,
+    subtotal: 1000,
+    gstAmount: 180,
+    grandTotal: 1180,
+    notes: "Test quotation",
+    customer: {
+      name: "Company B",
+      address: "Pune",
+      email: "customer@example.com",
+      phone: "1234567890",
+      gstNumber: "TESTGST123",
+    },
+    rfq: { rfqNumber: "RFQ-2611-014" },
+    parts: [{
+      quantity: 100,
+      unitPrice: 10,
+      totalPrice: 1000,
+      part: {
+        partNumber: "PART-001",
+        name: "Test spindle",
+        description: "Rear wheel spindle",
+        materialGrade: "EN8",
+      },
+    }],
+  };
+
+  it("generates a PDF for an approved quotation", async () => {
+    prismaMock.quotation.findUnique.mockResolvedValue(pdfQuotation);
+
+    const req = {
+      params: { id: "quotation-123" },
+    } as unknown as Request;
+    const res = mockResponse();
+
+    await downloadQuotationPdf(req, res);
+
+    expect(prismaMock.quotation.findUnique).toHaveBeenCalled();
+    expect(res.setHeader).toHaveBeenCalledWith(
+      "Content-Type",
+      "application/pdf"
+    );
+    expect(res.setHeader).toHaveBeenCalledWith(
+      "Content-Disposition",
+      'attachment; filename="QUO-TEST-123.pdf"'
+    );
+
+    const pdf = (res.send as any).mock.calls[0][0] as Buffer;
+    expect(Buffer.isBuffer(pdf)).toBe(true);
+    expect(pdf.subarray(0, 4).toString()).toBe("%PDF");
+  });
+
+  it("blocks PDF generation for a draft quotation", async () => {
+    prismaMock.quotation.findUnique.mockResolvedValue({
+      ...pdfQuotation,
+      status: "DRAFT",
+    });
+
+    const req = {
+      params: { id: "quotation-123" },
+    } as unknown as Request;
+    const res = mockResponse();
+
+    await downloadQuotationPdf(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.send).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,7 @@ import {
   createQuotation,
   getQuotations,
   getQuotationById,
+  downloadQuotationPdf,
   submitQuotation,
   approveQuotation,
   rejectQuotation,
@@ -19,6 +20,7 @@ router.use(authenticate);
 // Create and retrieve quotations
 router.post("/", createQuotation);
 router.get("/", getQuotations);
+router.get("/:id/pdf", downloadQuotationPdf);
 router.get("/:id", getQuotationById);
 
 // Submission and approval workflow
