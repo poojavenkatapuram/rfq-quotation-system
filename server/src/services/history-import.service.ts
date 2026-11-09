@@ -1,5 +1,7 @@
+import { gstPercentageSchema } from "./gst-validation.service.js";
 import ExcelJS from "exceljs";
 import { z } from "zod";
+import { assertSafeXlsxArchive } from "./xlsx-archive-validation.service.js";
 
 const headerAliases: Record<string, string[]> = {
   quotationNumber: ["quotation number", "quotation no", "quote number", "quote no"],
@@ -35,7 +37,7 @@ const rowSchema = z.object({
   unitPrice: z.number().nonnegative().optional(),
   totalPrice: z.number().nonnegative().optional(),
   subtotal: z.number().nonnegative().optional(),
-  gstPercentage: z.number().min(0).max(100).optional(),
+  gstPercentage: gstPercentageSchema.optional(),
   gstAmount: z.number().nonnegative().optional(),
   grandTotal: z.number().nonnegative().optional(),
   notes: z.string().max(2000).optional(),
@@ -122,6 +124,7 @@ const optionalDate = (value: string): Date | undefined => {
 export async function parseHistoricalQuotes(
   buffer: Buffer
 ): Promise<ParsedImportResult> {
+  assertSafeXlsxArchive(buffer);
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer as any);
 

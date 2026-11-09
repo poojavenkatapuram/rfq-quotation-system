@@ -10,6 +10,17 @@ async function makeWorkbook(rows: unknown[][]) {
 }
 
 describe("parseHistoricalQuotes", () => {
+  it.each([18, 18.1234, 0.0001, 100])("preserves supported GST rate %s", async rate => {
+    const buffer = await makeWorkbook([["Quotation Number", "Customer Name", "Part Name", "GST %"], ["GST-OK", "Company B", "Spindle", rate]]);
+    const result = await parseHistoricalQuotes(buffer);
+    expect(result.errors).toHaveLength(0); expect(result.records[0].gstPercentage).toBe(rate);
+  });
+  it.each([18.12345, 0.00001, 99.99999])("rejects unsupported GST precision %s before import", async rate => {
+    const buffer = await makeWorkbook([["Quotation Number", "Customer Name", "Part Name", "GST %"], ["GST-BAD", "Company B", "Spindle", rate]]);
+    const result = await parseHistoricalQuotes(buffer);
+    expect(result.records).toHaveLength(0); expect(result.errors).toEqual([{ row: 2, message: expect.stringContaining("at most 4 decimal places") }]);
+  });
+
   it("groups multiple parts belonging to one quotation", async () => {
     const buffer = await makeWorkbook([
       ["Quotation Number", "Customer Name", "Part Name", "Quantity"],

@@ -1,0 +1,12 @@
+{
+  "label": "SYNTHETIC DEMO DATA — not client-provided history",
+  "seed": 20261109,
+  "sourceRows": 1400,
+  "quotations": 700,
+  "partsPerQuotation": 2,
+  "invalidRows": 0,
+  "currency": "INR",
+  "sha256": "df07d2fb87a74dbe68a70ff522abb501f7b53d8967e080b38adbbeea9f0f8ae7",
+  "databaseWrites": false,
+  "persistenceVerification": "PENDING EXPLICIT ISOLATED DATABASE APPROVAL"
+}
