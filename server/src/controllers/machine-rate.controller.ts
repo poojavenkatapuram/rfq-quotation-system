@@ -8,7 +8,10 @@ const createMachineRateSchema = z.object({
     .transform((value) => value.toUpperCase()),
   machineName: z.string().trim().min(2).max(100),
   ratePerHour: z.coerce.number().positive(),
-  currency: z.string().trim().length(3).default("INR"),
+  currency: z.string().trim().toUpperCase().refine(
+    (value) => value === "INR",
+    "Only INR currency is supported"
+  ).default("INR"),
   effectiveFrom: z.string().min(1),
   effectiveTo: z.string().optional(),
 });

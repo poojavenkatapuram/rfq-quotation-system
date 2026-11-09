@@ -1,3 +1,5 @@
+import { getLockedRFQ, assertRFQOpen, syncRFQLifecycle, RFQLifecycleError } from "../services/rfq-lifecycle.service.js";
+import { lockRoutingPart } from "../services/routing-review.service.js";
 
 import { Request, Response } from "express";
 import { Prisma } from "@prisma/client";
@@ -5,7 +7,10 @@ import { z } from "zod";
 
 import prisma from "../lib/prisma.js";
 import type { AuthenticatedRequest } from "../middleware/auth.middleware.js";
-import { calculateCosting } from "../services/costing.service.js";
+import {
+  calculateCosting,
+  roundMoney,
+} from "../services/costing.service.js";
 
 const createCostingSchema = z.object({
   partId: z.string().min(1),
@@ -21,6 +26,10 @@ const createCostingSchema = z.object({
 });
 
 const idempotencyKeySchema = z.string().uuid();
+const SUPPORTED_CURRENCY = "INR";
+
+const isSupportedCurrency = (currency: string): boolean =>
+  currency.trim().toUpperCase() === SUPPORTED_CURRENCY;
 
 const isEffectiveRate = (
   rate: {
@@ -120,12 +129,14 @@ export const createCosting = async (
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockRoutingPart(tx, partId);
       const part = await tx.part.findUnique({
         where: { id: partId },
         include: {
           materialRate: true,
           routing: {
             include: {
+              technicalReviews: { where: { status: "APPROVED" } },
               operations: {
                 include: {
                   machineRate: true,
@@ -143,12 +154,19 @@ export const createCosting = async (
         return { error: "PART_NOT_FOUND" as const };
       }
 
+      const parentRFQ = await getLockedRFQ(tx, part.rfqId);
+      assertRFQOpen(parentRFQ);
+
       if (!part.grossWeightKg || Number(part.grossWeightKg) <= 0) {
         return { error: "INVALID_PART_WEIGHT" as const };
       }
 
       if (!part.materialRate) {
         return { error: "MATERIAL_RATE_MISSING" as const };
+      }
+
+      if (!isSupportedCurrency(part.materialRate.currency)) {
+        return { error: "MATERIAL_RATE_CURRENCY_UNSUPPORTED" as const };
       }
 
       const now = new Date();
@@ -183,6 +201,10 @@ export const createCosting = async (
           return { error: "MACHINE_RATE_MISSING" as const };
         }
 
+        if (!isSupportedCurrency(operation.machineRate.currency)) {
+          return { error: "MACHINE_RATE_CURRENCY_UNSUPPORTED" as const };
+        }
+
         if (!isEffectiveRate(operation.machineRate, now)) {
           return { error: "MACHINE_RATE_NOT_EFFECTIVE" as const };
         }
@@ -193,12 +215,14 @@ export const createCosting = async (
           operation.machineRate.ratePerHour
         );
 
-        const operationCost =
-          (cycleTimeMin / 60) * machineRatePerHour;
+        const operationCost = roundMoney(
+          (cycleTimeMin / 60) * machineRatePerHour
+        );
 
         const setupTimeMin = Number(operation.setupTimeMin ?? 0);
-        const operationSetupCost =
-          (setupTimeMin / 60) * machineRatePerHour;
+        const operationSetupCost = roundMoney(
+          (setupTimeMin / 60) * machineRatePerHour
+        );
 
         totalCycleTimeMin += cycleTimeMin;
         totalMachiningCost += operationCost;
@@ -228,6 +252,7 @@ export const createCosting = async (
         materialRatePerKg: Number(part.materialRate.ratePerKg),
         cycleTimeMin: totalCycleTimeMin,
         machineRatePerHour: effectiveMachineRate,
+        machiningCost: totalMachiningCost,
         setupCost: totalSetupCost,
         annualVolumes: uniqueVolumes,
         scrapPercentage,
@@ -307,6 +332,8 @@ export const createCosting = async (
       const savedCosting = await tx.costing.create({
         data: {
           partId,
+          routingRevision: part.routing!.revision,
+          routingTechnicalReviewId: part.routing!.technicalReviews?.find(review => review.routingRevision === part.routing!.revision)?.id ?? null,
           materialRateId: part.materialRate.id,
           materialRatePerKgSnapshot: Number(part.materialRate.ratePerKg),
           createdById: userId,
@@ -337,6 +364,7 @@ export const createCosting = async (
         },
       });
 
+      await syncRFQLifecycle(tx, parentRFQ, userId);
       await tx.auditLog.create({
         data: {
           actorId: userId,
@@ -384,6 +412,10 @@ export const createCosting = async (
           status: 400,
           message: "The linked material rate is not currently effective",
         },
+        MATERIAL_RATE_CURRENCY_UNSUPPORTED: {
+          status: 400,
+          message: "The linked material rate must use INR currency",
+        },
         ROUTING_MISSING: {
           status: 400,
           message: "No routing operations are configured for this part",
@@ -395,6 +427,10 @@ export const createCosting = async (
         MACHINE_RATE_NOT_EFFECTIVE: {
           status: 400,
           message: "A linked machine rate is not currently effective",
+        },
+        MACHINE_RATE_CURRENCY_UNSUPPORTED: {
+          status: 400,
+          message: "All linked machine rates must use INR currency",
         },
       };
 
@@ -412,6 +448,7 @@ export const createCosting = async (
       data: result,
     });
   } catch (error) {
+    if (error instanceof RFQLifecycleError) { res.status(error.status).json({ message: error.message }); return; }
     // A concurrent request may have inserted the same idempotency key.
     if (isUniqueConstraintError(error) && idempotencyKey) {
       const existingCosting = await prisma.costing.findUnique({

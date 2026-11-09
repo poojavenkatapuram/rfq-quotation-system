@@ -37,7 +37,18 @@ describe("calculateCosting", () => {
   it("includes overhead, packing and freight in total cost", () => {
     const result = calculateCosting(validInput);
 
-    expect(result.totalCost).toBe(122.78);
+    expect(result.totalCost).toBe(122.77);
+    const recurringComponentPaise = [
+      result.materialCost,
+      result.machiningCost,
+      result.scrapCost,
+      result.overheadAmount,
+      result.packingAmount,
+      result.freightAmount,
+    ].reduce((total, amount) => total + Math.round(amount * 100), 0);
+
+    expect(recurringComponentPaise).toBe(12277);
+    expect(result.totalCost).toBe(recurringComponentPaise / 100);
   });
 
   it("calculates volume-specific selling prices and allocates setup cost", () => {
@@ -46,9 +57,59 @@ describe("calculateCosting", () => {
     expect(result.volumeResults).toHaveLength(2);
     expect(result.volumeResults[0].setupCostPerPart).toBe(0.6);
     expect(result.volumeResults[1].setupCostPerPart).toBe(0.12);
+    expect(result.volumeResults[0]).toMatchObject({
+      unitCost: 123.37,
+      unitSellingPrice: 154.21,
+      annualValue: 154210,
+    });
+    expect(result.volumeResults[1]).toMatchObject({
+      unitCost: 122.89,
+      unitSellingPrice: 153.61,
+      annualValue: 768050,
+    });
     expect(result.volumeResults[0].unitSellingPrice).toBeGreaterThan(
       result.volumeResults[1].unitSellingPrice
     );
+  });
+
+  it("rounds one-paise component boundaries before calculating totals", () => {
+    const result = calculateCosting({
+      grossWeightKg: 1,
+      materialRatePerKg: 1,
+      cycleTimeMin: 0.3,
+      machineRatePerHour: 1,
+      setupCost: 0,
+      annualVolumes: [1],
+      scrapPercentage: 0,
+      overheadAmount: 0.005,
+      packingAmount: 0,
+      freightAmount: 0,
+      profitMargin: 0,
+    });
+
+    expect(result.machiningCost).toBe(0.01);
+    expect(result.overheadAmount).toBe(0.01);
+    expect(result.totalCost).toBe(1.02);
+    expect(result.volumeResults[0]).toMatchObject({
+      unitCost: 1.02,
+      unitSellingPrice: 1.02,
+      annualValue: 1.02,
+    });
+  });
+
+  it("keeps large-volume annual values derived from the saved unit price", () => {
+    const result = calculateCosting({
+      ...validInput,
+      annualVolumes: [50_000_000],
+    });
+
+    expect(result.volumeResults[0]).toMatchObject({
+      annualVolume: 50_000_000,
+      setupCostPerPart: 0,
+      unitCost: 122.77,
+      unitSellingPrice: 153.46,
+      annualValue: 7_673_000_000,
+    });
   });
 
   it("rejects zero gross weight", () => {

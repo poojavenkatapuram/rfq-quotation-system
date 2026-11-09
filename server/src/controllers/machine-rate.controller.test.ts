@@ -169,6 +169,55 @@ describe("Machine Rate Controller", () => {
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
+    it.each(["inr", "InR"])(
+      "should normalize %s to INR",
+      async (currency) => {
+        const req = createRequest({
+          machineCode: "CNC-01",
+          machineName: "CNC Turning Machine",
+          ratePerHour: 850,
+          currency,
+          effectiveFrom: "2026-01-01",
+        });
+        const res = createResponse();
+
+        await createMachineRate(
+          req as unknown as Parameters<typeof createMachineRate>[0],
+          res
+        );
+
+        expect(mockCreate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ currency: "INR" }),
+          })
+        );
+        expect(res.status).toHaveBeenCalledWith(201);
+      }
+    );
+
+    it.each(["USD", "EUR", "US", "INR1"])(
+      "should reject unsupported currency %s",
+      async (currency) => {
+        const req = createRequest({
+          machineCode: "CNC-01",
+          machineName: "CNC Turning Machine",
+          ratePerHour: 850,
+          currency,
+          effectiveFrom: "2026-01-01",
+        });
+        const res = createResponse();
+
+        await createMachineRate(
+          req as unknown as Parameters<typeof createMachineRate>[0],
+          res
+        );
+
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(mockTransaction).not.toHaveBeenCalled();
+        expect(mockCreate).not.toHaveBeenCalled();
+      }
+    );
+
     it("should normalize machine codes to uppercase", async () => {
       const req = createRequest({
         machineCode: "cnc-01",

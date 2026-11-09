@@ -172,6 +172,57 @@ describe("Material Rate Controller", () => {
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
+    it.each(["inr", "InR"])(
+      "should normalize %s to INR",
+      async (currency) => {
+        const req = createRequest({
+          materialCode: "EN8",
+          materialName: "Carbon Steel",
+          grade: "EN8",
+          ratePerKg: 85,
+          currency,
+          effectiveFrom: "2026-01-01",
+        });
+        const res = createResponse();
+
+        await createMaterialRate(
+          req as unknown as Parameters<typeof createMaterialRate>[0],
+          res
+        );
+
+        expect(mockCreate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ currency: "INR" }),
+          })
+        );
+        expect(res.status).toHaveBeenCalledWith(201);
+      }
+    );
+
+    it.each(["USD", "EUR", "US", "INR1"])(
+      "should reject unsupported currency %s",
+      async (currency) => {
+        const req = createRequest({
+          materialCode: "EN8",
+          materialName: "Carbon Steel",
+          grade: "EN8",
+          ratePerKg: 85,
+          currency,
+          effectiveFrom: "2026-01-01",
+        });
+        const res = createResponse();
+
+        await createMaterialRate(
+          req as unknown as Parameters<typeof createMaterialRate>[0],
+          res
+        );
+
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(mockTransaction).not.toHaveBeenCalled();
+        expect(mockCreate).not.toHaveBeenCalled();
+      }
+    );
+
     it("should reject a non-positive material rate", async () => {
       const req = createRequest({
         materialCode: "EN8",

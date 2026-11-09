@@ -3,6 +3,7 @@ export interface CostingInput {
   materialRatePerKg: number;
   cycleTimeMin: number;
   machineRatePerHour: number;
+  machiningCost?: number;
   setupCost: number;
   scrapPercentage: number;
   overheadAmount: number;
@@ -33,7 +34,7 @@ export interface CostingResult {
   volumeResults: VolumeCostingResult[];
 }
 
-function roundMoney(value: number): number {
+export function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
@@ -61,6 +62,15 @@ function validateInput(input: CostingInput): void {
     if (value < 0) {
       throw new Error(`${field} cannot be negative`);
     }
+  }
+
+  if (
+    input.machiningCost !== undefined &&
+    (typeof input.machiningCost !== "number" ||
+      !Number.isFinite(input.machiningCost) ||
+      input.machiningCost < 0)
+  ) {
+    throw new Error("machiningCost must be a valid non-negative number");
   }
 
   if (input.grossWeightKg <= 0) {
@@ -105,43 +115,53 @@ function validateInput(input: CostingInput): void {
 export function calculateCosting(input: CostingInput): CostingResult {
   validateInput(input);
 
-  const materialCost =
-    input.grossWeightKg * input.materialRatePerKg;
+  const materialCost = roundMoney(
+    input.grossWeightKg * input.materialRatePerKg
+  );
 
-  const machiningCost =
-    (input.cycleTimeMin / 60) * input.machineRatePerHour;
+  const machiningCost = roundMoney(
+    input.machiningCost ??
+      (input.cycleTimeMin / 60) * input.machineRatePerHour
+  );
 
-  const scrapCost =
-    materialCost * (input.scrapPercentage / 100);
+  const scrapCost = roundMoney(
+    input.grossWeightKg *
+      input.materialRatePerKg *
+      (input.scrapPercentage / 100)
+  );
 
-  // Recurring cost for manufacturing one finished part.
-  const totalCost =
+  const setupCost = roundMoney(input.setupCost);
+  const overheadAmount = roundMoney(input.overheadAmount);
+  const packingAmount = roundMoney(input.packingAmount);
+  const freightAmount = roundMoney(input.freightAmount);
+
+  // Recurring cost for manufacturing one finished part. This must be the
+  // sum of the paise-rounded values that are persisted as cost components.
+  const totalCost = roundMoney(
     materialCost +
     machiningCost +
     scrapCost +
-    input.overheadAmount +
-    input.packingAmount +
-    input.freightAmount;
+    overheadAmount +
+    packingAmount +
+    freightAmount
+  );
 
   // Setup is a batch-level cost, allocated over the selected volume.
   const volumeResults = [...new Set(input.annualVolumes)].map(
     (annualVolume): VolumeCostingResult => {
-      const setupCostPerPart =
-        input.setupCost / annualVolume;
+      const setupCostPerPart = roundMoney(setupCost / annualVolume);
 
-      const unitCost =
-        totalCost + setupCostPerPart;
+      const unitCost = roundMoney(totalCost + setupCostPerPart);
 
-      const unitSellingPrice =
-        unitCost / (1 - input.profitMargin / 100);
+      const unitSellingPrice = unitCost / (1 - input.profitMargin / 100);
 
       const roundedUnitSellingPrice =
         roundMoney(unitSellingPrice);
 
       return {
         annualVolume,
-        setupCostPerPart: roundMoney(setupCostPerPart),
-        unitCost: roundMoney(unitCost),
+        setupCostPerPart,
+        unitCost,
         unitSellingPrice: roundedUnitSellingPrice,
         annualValue: roundMoney(
           roundedUnitSellingPrice * annualVolume,
@@ -151,14 +171,14 @@ export function calculateCosting(input: CostingInput): CostingResult {
   );
 
   return {
-    materialCost: roundMoney(materialCost),
-    machiningCost: roundMoney(machiningCost),
-    setupCost: roundMoney(input.setupCost),
-    scrapCost: roundMoney(scrapCost),
-    overheadAmount: roundMoney(input.overheadAmount),
-    packingAmount: roundMoney(input.packingAmount),
-    freightAmount: roundMoney(input.freightAmount),
-    totalCost: roundMoney(totalCost),
+    materialCost,
+    machiningCost,
+    setupCost,
+    scrapCost,
+    overheadAmount,
+    packingAmount,
+    freightAmount,
+    totalCost,
     profitMargin: input.profitMargin,
     volumeResults,
   };

@@ -10,7 +10,10 @@ const materialRateSchema = z.object({
   materialName: z.string().trim().min(2).max(150),
   grade: z.string().trim().min(1).max(80),
   ratePerKg: z.number().positive().max(9999999999),
-  currency: z.string().trim().length(3).default("INR"),
+  currency: z.string().trim().toUpperCase().refine(
+    (value) => value === "INR",
+    "Only INR currency is supported"
+  ).default("INR"),
   effectiveFrom: z.coerce.date(),
   effectiveTo: z.coerce.date().nullable().optional(),
 }).refine(
@@ -203,7 +206,7 @@ export const createMaterialRate = async (
           materialName: data.materialName,
           grade: data.grade,
           ratePerKg: data.ratePerKg,
-          currency: data.currency.toUpperCase(),
+          currency: data.currency,
           effectiveFrom: data.effectiveFrom,
           effectiveTo: data.effectiveTo ?? null,
           isActive: true,
