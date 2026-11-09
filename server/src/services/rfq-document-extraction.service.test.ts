@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { syntheticPdf, syntheticRfqDocuments, syntheticText } from "../fixtures/synthetic-rfq-documents.js";
 import {
   extractDocumentCandidates,
@@ -288,6 +289,47 @@ describe("RFQ document extraction", () => {
     expect(result.candidates.some((candidate) =>
       ["revision", "cycleTimeMinutes"].includes(candidate.fieldName)
     )).toBe(false);
+  });
+
+  it("extracts valid XLSX workbooks whose SpreadsheetML elements use a namespace prefix", async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Synthetic Parts");
+    sheet.addRow(["Part Number", "Part Name", "Material Grade", "Cycle Time Min"]);
+    sheet.addRow(["SYN-PREFIX-001", "Synthetic Test Shaft", "EN8", 4.8]);
+
+    const archive = await JSZip.loadAsync(
+      Buffer.from(await workbook.xlsx.writeBuffer())
+    );
+    const spreadsheetNamespace =
+      "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    for (const [name, entry] of Object.entries(archive.files)) {
+      if (entry.dir || !name.toLowerCase().endsWith(".xml")) continue;
+      const xml = await entry.async("string");
+      if (!xml.includes(`xmlns="${spreadsheetNamespace}"`)) continue;
+      const prefixed = xml
+        .replace(
+          `xmlns="${spreadsheetNamespace}"`,
+          `xmlns:x="${spreadsheetNamespace}"`
+        )
+        .replace(/(<\/?)([A-Za-z_][\w.-]*)(?=[\s/>])/g, "$1x:$2");
+      archive.file(name, prefixed);
+    }
+
+    const result = await extractDocumentContent(
+      await archive.generateAsync({ type: "nodebuffer" }),
+      "XLSX"
+    );
+
+    expect(result.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ fieldName: "partNumber", extractedValue: "SYN-PREFIX-001" }),
+        expect.objectContaining({ fieldName: "partName", extractedValue: "Synthetic Test Shaft" }),
+        expect.objectContaining({ fieldName: "materialGrade", extractedValue: "EN8" }),
+      ])
+    );
+    expect(result.candidates.some((candidate) => candidate.fieldName === "cycleTimeMinutes")).toBe(false);
+    expect(result.textSources[0]?.text).toContain("Cycle Time Min: 4.8");
   });
 
   it("bounds oversized text sources without changing deterministic candidates", async () => {

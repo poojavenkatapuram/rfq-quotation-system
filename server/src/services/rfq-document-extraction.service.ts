@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { Readable } from "node:stream";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -93,6 +94,46 @@ export interface DocumentExtractionResult {
 
 const MAX_AI_SOURCE_CHARACTERS = 4_000;
 const MAX_AI_SOURCES = 12;
+const SPREADSHEET_ML_NAMESPACE =
+  "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+function normalizeSpreadsheetMlElementPrefixes(xml: string): string {
+  const rootTag = /<[A-Za-z_][\w:.-]*\b[^>]*>/.exec(xml)?.[0];
+  if (!rootTag) return xml;
+  const prefixes = [...rootTag.matchAll(/xmlns:([\w.-]+)\s*=\s*(["'])(.*?)\2/g)]
+    .filter((match) => match[3] === SPREADSHEET_ML_NAMESPACE)
+    .map((match) => match[1]);
+
+  return prefixes.reduce((normalized, prefix) => {
+    const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const qualifiedElement = new RegExp(
+      `(<\\/?)(?:${escapedPrefix}):([A-Za-z_][\\w.-]*)(?=[\\s/>])`,
+      "g"
+    );
+    return normalized.replace(qualifiedElement, "$1$2");
+  }, xml);
+}
+
+async function normalizePrefixedSpreadsheetMl(buffer: Buffer): Promise<Buffer> {
+  const archive = await JSZip.loadAsync(buffer);
+  let changed = false;
+
+  for (const [name, entry] of Object.entries(archive.files)) {
+    if (entry.dir || !name.toLowerCase().endsWith(".xml")) continue;
+    const xml = await entry.async("string");
+    const normalized = normalizeSpreadsheetMlElementPrefixes(xml);
+    if (normalized !== xml) {
+      archive.file(name, normalized);
+      changed = true;
+    }
+  }
+
+  if (!changed) return buffer;
+
+  const normalizedArchive = await archive.generateAsync({ type: "nodebuffer" });
+  assertSafeXlsxArchive(normalizedArchive);
+  return normalizedArchive;
+}
 
 export function createBoundedTextSources(
   text: string,
@@ -372,8 +413,9 @@ async function extractFromExcel(
   buffer: Buffer
 ): Promise<DocumentExtractionResult> {
   assertSafeXlsxArchive(buffer);
+  const parserBuffer = await normalizePrefixedSpreadsheetMl(buffer);
   const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.read(Readable.from([buffer]));
+  await workbook.xlsx.read(Readable.from([parserBuffer]));
 
   const candidates: ExtractedCandidate[] = [];
   const textSources: ExtractedTextSource[] = [];
