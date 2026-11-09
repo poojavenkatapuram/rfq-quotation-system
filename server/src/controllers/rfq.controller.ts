@@ -1,7 +1,13 @@
+import { canReadDocument, canManageIntakeDocument } from "../services/document-access.service.js";
+import { getLockedRFQ, nextRFQUpdatedAt, RFQLifecycleError } from "../services/rfq-lifecycle.service.js";
 
 import { Request, Response } from "express";
 import { Prisma } from "@prisma/client";
-import { RFQStatus } from "@prisma/client";
+import {
+  ExtractionFieldReviewStatus,
+  ExtractionStatus,
+  RFQStatus,
+} from "@prisma/client";
 import { z } from "zod";
 
 import prisma from "../lib/prisma.js";
@@ -19,6 +25,8 @@ const partSchema = z.object({
   grossWeightKg: z.number().positive().optional(),
   annualVolume: z.number().int().positive().optional(),
   drawingNumber: z.string().trim().max(100).optional(),
+  revision: z.string().trim().max(100).optional(),
+  sourceGroupKey: z.string().trim().max(300).optional(),
 });
 
 const createRFQSchema = z.object({
@@ -29,6 +37,8 @@ const createRFQSchema = z.object({
   dueDate: z.coerce.date().optional(),
   notes: z.string().trim().max(2000).optional(),
   parts: z.array(partSchema).min(1).max(100),
+  extractionJobIds: z.array(z.string().min(1)).min(1).max(20).optional(),
+
 }).refine(
   (data) =>
     !data.receivedDate ||
@@ -40,14 +50,15 @@ const createRFQSchema = z.object({
   }
 );
 
-const updateRFQSchema = z.object({
+const updateRFQSchema = z.strictObject({
+  expectedUpdatedAt: z.string().datetime({ offset: true }),
   assignedToId: z.string().min(1).nullable().optional(),
   dueDate: z.coerce.date().nullable().optional(),
   notes: z.string().trim().max(2000).nullable().optional(),
   status: z.nativeEnum(RFQStatus).optional(),
   lostReason: z.string().trim().min(2).max(500).optional(),
 }).refine(
-  (data) => Object.keys(data).length > 0,
+  (data) => Object.keys(data).some(key => key !== "expectedUpdatedAt"),
   { message: "At least one field is required" }
 );
 
@@ -90,21 +101,29 @@ const isPrismaUniqueConstraintError = (
   );
 };
 
+class IntakeLinkingError extends Error {
+  constructor(
+    public readonly code:
+      | "NOT_FOUND"
+      | "FORBIDDEN"
+      | "NOT_COMPLETED"
+      | "NOT_REVIEWED"
+      | "ALREADY_LINKED",
+    message: string
+  ) {
+    super(message);
+  }
+}
+
 const allowedTransitions: Record<RFQStatus, RFQStatus[]> = {
   RECEIVED: [
     RFQStatus.ESTIMATING,
     RFQStatus.LOST,
   ],
   ESTIMATING: [
-    RFQStatus.PENDING_APPROVAL,
-    RFQStatus.QUOTATION_SENT,
     RFQStatus.LOST,
   ],
-  PENDING_APPROVAL: [
-    RFQStatus.ESTIMATING,
-    RFQStatus.QUOTATION_SENT,
-    RFQStatus.LOST,
-  ],
+  PENDING_APPROVAL: [RFQStatus.LOST],
   QUOTATION_SENT: [
     RFQStatus.WON,
     RFQStatus.LOST,
@@ -122,6 +141,20 @@ export const createRFQ = async (
   res: Response
 ) => {
   try {
+    if (!req.user?.userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+    }
+
+    if (!["ESTIMATOR", "ADMIN"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only estimators or administrators can create RFQs",
+      });
+    }
+
     const validation = createRFQSchema.safeParse(req.body);
 
     if (!validation.success) {
@@ -132,14 +165,18 @@ export const createRFQ = async (
       });
     }
 
-    if (!req.user?.userId) {
-      return res.status(401).json({
+    const data = validation.data;
+
+    if (
+      data.extractionJobIds &&
+      new Set(data.extractionJobIds).size !== data.extractionJobIds.length
+    ) {
+      return res.status(400).json({
         success: false,
-        message: "Authentication required",
+        message: "Duplicate extraction job IDs are not allowed",
       });
     }
 
-    const data = validation.data;
 
     const [customer, creator, assignee] = await Promise.all([
       prisma.customer.findUnique({
@@ -201,6 +238,85 @@ export const createRFQ = async (
     }
 
     const rfq = await prisma.$transaction(async (tx) => {
+      const extractionJobs = data.extractionJobIds
+        ? await tx.extractionJob.findMany({
+            where: { id: { in: data.extractionJobIds } },
+            include: {
+              attachment: {
+                select: {
+                  id: true,
+                  rfqId: true,
+                  uploadedById: true,
+                },
+              },
+              fields: {
+                select: { reviewStatus: true, groupKey: true },
+              },
+            },
+          })
+        : [];
+
+      if (extractionJobs.length !== (data.extractionJobIds?.length || 0)) {
+        throw new IntakeLinkingError(
+          "NOT_FOUND",
+          "One or more extraction jobs were not found"
+        );
+      }
+
+      for (const job of extractionJobs) {
+        if (job.status !== ExtractionStatus.COMPLETED) {
+          throw new IntakeLinkingError(
+            "NOT_COMPLETED",
+            "Only completed extraction jobs can be linked"
+          );
+        }
+
+        if (job.attachment.rfqId) {
+          throw new IntakeLinkingError(
+            "ALREADY_LINKED",
+            "An extraction job is already linked to an RFQ"
+          );
+        }
+
+        if (
+          !canManageIntakeDocument(req.user, job.attachment.uploadedById)
+        ) {
+          throw new IntakeLinkingError(
+            "FORBIDDEN",
+            "You do not have access to one or more extraction jobs"
+          );
+        }
+
+        if (
+          job.fields.some(
+            (field) =>
+              field.reviewStatus === ExtractionFieldReviewStatus.PENDING
+          )
+        ) {
+          throw new IntakeLinkingError(
+            "NOT_REVIEWED",
+            "Review every extracted field before creating the RFQ"
+          );
+        }
+      }
+
+      const sourceGroups = new Set(extractionJobs.flatMap((job) => job.fields.map((field) => `${job.id}::${field.groupKey || "document"}`)));
+      const usedGroups = new Set<string>();
+      const partIdentifiers = new Set<string>();
+      for (const part of data.parts) {
+        if (part.sourceGroupKey) {
+          if (!sourceGroups.has(part.sourceGroupKey) || usedGroups.has(part.sourceGroupKey)) {
+            throw new IntakeLinkingError("NOT_REVIEWED", "Each part must reference a distinct reviewed source group from the linked documents");
+          }
+          usedGroups.add(part.sourceGroupKey);
+        }
+        if (extractionJobs.length && (part.partNumber || part.drawingNumber)) {
+          const identifier = `${part.partNumber || part.drawingNumber}:${part.revision || ""}`.toLowerCase();
+          if (partIdentifiers.has(identifier)) throw new IntakeLinkingError("NOT_REVIEWED", "Duplicate part identifiers must be resolved before creating an intake RFQ");
+          partIdentifiers.add(identifier);
+        }
+      }
+
       const createdRFQ = await tx.rFQ.create({
         data: {
           rfqNumber: data.rfqNumber,
@@ -219,6 +335,7 @@ export const createRFQ = async (
               grossWeightKg: part.grossWeightKg,
               annualVolume: part.annualVolume,
               drawingNumber: part.drawingNumber,
+              revision: part.revision,
             })),
           },
         },
@@ -242,6 +359,60 @@ export const createRFQ = async (
         },
       });
 
+      if (extractionJobs.length > 0) {
+        const attachmentIds = extractionJobs.map(
+          (job) => job.attachment.id
+        );
+        const jobIds = extractionJobs.map((job) => job.id);
+
+        const linkedAttachments = await tx.attachment.updateMany({
+          where: {
+            id: { in: attachmentIds },
+            rfqId: null,
+          },
+          data: { rfqId: createdRFQ.id },
+        });
+        if (linkedAttachments.count !== attachmentIds.length) {
+          throw new IntakeLinkingError(
+            "ALREADY_LINKED",
+            "An attachment was linked while this RFQ was being created"
+          );
+        }
+
+        const linkedJobs = await tx.extractionJob.updateMany({
+          where: {
+            id: { in: jobIds },
+            rfqId: null,
+          },
+          data: { rfqId: createdRFQ.id },
+        });
+
+        if (linkedJobs.count !== jobIds.length) {
+          throw new IntakeLinkingError(
+            "ALREADY_LINKED",
+            "An extraction job was linked while this RFQ was being created"
+          );
+        }
+
+        await tx.auditLog.create({
+          data: {
+            actorId: req.user!.userId,
+            action: "DOCUMENTS_LINKED_TO_RFQ",
+            entityType: "RFQ",
+            entityId: createdRFQ.id,
+            details: {
+              extractionJobIds: jobIds,
+              attachmentIds,
+              partSources: data.parts.map((part) => ({
+                partNumber: part.partNumber ?? null, name: part.name,
+                drawingNumber: part.drawingNumber ?? null, revision: part.revision ?? null,
+                sourceGroupKey: part.sourceGroupKey ?? null,
+              })),
+            },
+          },
+        });
+      }
+
       await tx.auditLog.create({
         data: {
           actorId: req.user!.userId,
@@ -251,6 +422,7 @@ export const createRFQ = async (
           details: {
             rfqNumber: createdRFQ.rfqNumber,
             partCount: createdRFQ.parts.length,
+            linkedExtractionJobCount: extractionJobs.length,
           },
         },
       });
@@ -264,6 +436,19 @@ export const createRFQ = async (
       data: rfq,
     });
   } catch (error) {
+    if (error instanceof IntakeLinkingError) {
+      const status = error.code === "FORBIDDEN"
+        ? 403
+        : error.code === "ALREADY_LINKED"
+          ? 409
+          : 400;
+
+      return res.status(status).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     if (isPrismaUniqueConstraintError(error)) {
       return res.status(409).json({
         success: false,
@@ -381,10 +566,11 @@ export const getRFQs = async (
 // --------------------------------------------------
 
 export const getRFQById = async (
-  req: Request,
+  req: AuthenticatedRequest,
   res: Response
 ) => {
   try {
+    if (!req.user?.userId) return res.status(401).json({ success: false, message: "Authentication required" });
     const rfqId = req.params.id;
 
     if (typeof rfqId !== "string") {
@@ -421,7 +607,61 @@ export const getRFQById = async (
             },
           },
         },
-        attachments: true,
+        attachments: {
+          select: {
+            id: true,
+            rfqId: true,
+            partId: true,
+            uploadedById: true,
+            fileName: true,
+            mimeType: true,
+            fileSize: true,
+            createdAt: true,
+          },
+        },
+        extractionJobs: {
+          select: {
+            id: true,
+            rfqId: true,
+            attachmentId: true,
+            status: true,
+            provider: true,
+            errorMessage: true,
+            createdAt: true,
+            completedAt: true,
+            attachment: {
+              select: {
+                id: true,
+                uploadedById: true,
+                fileName: true,
+                mimeType: true,
+                fileSize: true,
+                createdAt: true,
+              },
+            },
+            fields: {
+              select: {
+                id: true,
+                fieldName: true,
+                extractedValue: true,
+                confidence: true,
+                sourceReference: true,
+                sourceId: true,
+                evidenceText: true,
+                extractionMethod: true,
+                groupKey: true,
+                acceptedValue: true,
+                isAccepted: true,
+                reviewStatus: true,
+                reviewedAt: true,
+                createdAt: true,
+              },
+              orderBy: { createdAt: "asc" },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+
         quotations: true,
       },
     });
@@ -435,7 +675,11 @@ export const getRFQById = async (
 
     return res.status(200).json({
       success: true,
-      data: rfq,
+      data: {
+        ...rfq,
+        attachments: rfq.attachments.filter(attachment => canReadDocument(req.user, attachment.uploadedById, rfq)),
+        extractionJobs: rfq.extractionJobs.filter(job => canReadDocument(req.user, job.attachment.uploadedById, rfq)),
+      },
     });
   } catch (error) {
     console.error("Get RFQ error:", error);
@@ -472,6 +716,32 @@ export const updateRFQ = async (
       });
     }
 
+    const role = req.user.role;
+
+    if (!["ESTIMATOR", "ADMIN", "SALES_HEAD"].includes(role)) {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to update RFQs",
+      });
+    }
+
+    if (role === "SALES_HEAD") {
+      const submittedFields =
+        req.body && typeof req.body === "object" && !Array.isArray(req.body)
+          ? Object.keys(req.body)
+          : [];
+      const allowedOutcomeFields = new Set(["status", "lostReason", "expectedUpdatedAt"]);
+
+      if (
+        submittedFields.some((field) => !allowedOutcomeFields.has(field))
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Sales Heads may only record RFQ commercial outcomes",
+        });
+      }
+    }
+
     const validation = updateRFQSchema.safeParse(req.body);
 
     if (!validation.success) {
@@ -484,104 +754,60 @@ export const updateRFQ = async (
 
     const data = validation.data;
 
-    const existingRFQ = await prisma.rFQ.findUnique({
-      where: { id: rfqId },
-    });
-
-    if (!existingRFQ) {
-      return res.status(404).json({
-        success: false,
-        message: "RFQ not found",
-      });
-    }
-
     if (
-      data.status &&
-      data.status !== existingRFQ.status &&
-      !allowedTransitions[existingRFQ.status].includes(data.status)
+      role === "SALES_HEAD" &&
+      data.status !== RFQStatus.WON &&
+      data.status !== RFQStatus.LOST
     ) {
-      return res.status(400).json({
+      return res.status(403).json({
         success: false,
-        message: `Cannot change RFQ status from ${existingRFQ.status} to ${data.status}`,
+        message: "Sales Heads may only mark RFQs as won or lost",
       });
     }
 
-    if (
-      data.status === RFQStatus.LOST &&
-      !data.lostReason?.trim()
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "A reason is required when marking an RFQ as lost",
-      });
+    if (data.status === RFQStatus.QUOTATION_SENT || data.status === RFQStatus.PENDING_APPROVAL) {
+      return res.status(403).json({ success: false, message: "Pending approval and quotation sent are set only by the quotation workflow" });
     }
-
-    if (
-      data.status &&
-      data.status !== RFQStatus.LOST &&
-      data.lostReason
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Lost reason is only allowed for lost RFQs",
-      });
-    }
-
-    if (
-      data.assignedToId &&
-      data.assignedToId !== existingRFQ.assignedToId
-    ) {
-      const estimator = await prisma.user.findUnique({
-        where: { id: data.assignedToId },
-        select: {
-          id: true,
-          isActive: true,
-          role: true,
-        },
-      });
-
-      if (
-        !estimator ||
-        !estimator.isActive ||
-        estimator.role !== "ESTIMATOR"
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Assigned user must be an active estimator",
-        });
-      }
-    }
-
-    const { lostReason, ...updateData } = data;
 
     const updatedRFQ = await prisma.$transaction(async (tx) => {
-      const updated = await tx.rFQ.update({
-        where: { id: rfqId },
+      const existingRFQ = await getLockedRFQ(tx, rfqId);
+      if (existingRFQ.updatedAt.getTime() !== new Date(data.expectedUpdatedAt).getTime()) {
+        throw new RFQLifecycleError("The RFQ changed since you loaded it. Refresh before changing its owner or status.");
+      }
+      if (data.status && data.status !== existingRFQ.status && !allowedTransitions[existingRFQ.status].includes(data.status)) {
+        throw new RFQLifecycleError(`Cannot change RFQ status from ${existingRFQ.status} to ${data.status}`, 400);
+      }
+      if (data.status === RFQStatus.LOST && !data.lostReason?.trim()) {
+        throw new RFQLifecycleError("A reason is required when marking an RFQ as lost", 400);
+      }
+      if (data.status && data.status !== RFQStatus.LOST && data.lostReason) {
+        throw new RFQLifecycleError("Lost reason is only allowed for lost RFQs", 400);
+      }
+      if (data.assignedToId && data.assignedToId !== existingRFQ.assignedToId) {
+        const estimator = await tx.user.findUnique({ where: { id: data.assignedToId }, select: { id: true, isActive: true, role: true } });
+        if (!estimator || !estimator.isActive || estimator.role !== "ESTIMATOR") {
+          throw new RFQLifecycleError("Assigned user must be an active estimator", 400);
+        }
+      }
+      const { expectedUpdatedAt: _expectedUpdatedAt, lostReason, ...updateData } = data;
+      const transition = await tx.rFQ.updateMany({
+        where: { id: rfqId, status: existingRFQ.status, updatedAt: existingRFQ.updatedAt },
         data: {
           ...updateData,
-          ...(data.status === RFQStatus.LOST
-            ? { lostReason }
-            : data.status
-              ? { lostReason: null }
-              : {}),
-        },
-        include: rfqInclude,
-      });
-
-      await tx.auditLog.create({
-        data: {
-          actorId: req.user!.userId,
-          action: "RFQ_UPDATED",
-          entityType: "RFQ",
-          entityId: rfqId,
-          details: {
-            updatedFields: Object.keys(data),
-            previousStatus: existingRFQ.status,
-            newStatus: updated.status,
-          },
+          updatedAt: nextRFQUpdatedAt(existingRFQ.updatedAt),
+          ...(data.status === RFQStatus.LOST ? { lostReason } : data.status ? { lostReason: null } : {}),
         },
       });
-
+      if (transition.count !== 1) throw new RFQLifecycleError("The RFQ changed during this update. Refresh and try again.");
+      const updated = await tx.rFQ.findUnique({ where: { id: rfqId }, include: rfqInclude });
+      if (!updated) throw new RFQLifecycleError("RFQ not found", 404);
+      await tx.auditLog.create({ data: {
+        actorId: req.user!.userId, action: "RFQ_UPDATED", entityType: "RFQ", entityId: rfqId,
+        details: {
+          updatedFields: Object.keys(data).filter(key => key !== "expectedUpdatedAt"), previousStatus: existingRFQ.status, newStatus: updated.status,
+          previousAssignedToId: existingRFQ.assignedToId, assignedToId: updated.assignedToId,
+        },
+      } });
       return updated;
     });
 
@@ -591,11 +817,25 @@ export const updateRFQ = async (
       data: updatedRFQ,
     });
   } catch (error) {
+    if (error instanceof RFQLifecycleError) return res.status(error.status).json({ success: false, message: error.message });
     console.error("Update RFQ error:", error);
 
     return res.status(500).json({
       success: false,
       message: "Unable to update RFQ",
     });
+  }
+};
+
+
+export const getRFQAssignees = async (req: AuthenticatedRequest, res: Response) => {
+  if (!req.user?.userId) return res.status(401).json({ success: false, message: "Authentication required" });
+  if (!["ADMIN", "ESTIMATOR"].includes(req.user.role)) return res.status(403).json({ success: false, message: "Only administrators and estimators can assign RFQ owners" });
+  try {
+    const data = await prisma.user.findMany({ where: { role: "ESTIMATOR", isActive: true }, select: { id: true, name: true }, orderBy: [{ name: "asc" }, { id: "asc" }] });
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("RFQ assignee lookup failed:", error);
+    return res.status(500).json({ success: false, message: "Unable to load RFQ owners" });
   }
 };

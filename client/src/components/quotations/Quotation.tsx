@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import axios from 'axios'
 import {
   FileText, Plus, RefreshCw, Search, Eye, Printer,
   Send, CheckCircle, XCircle, Clock, X, AlertCircle,
@@ -6,7 +7,76 @@ import {
 import api from '../../services/api'
 import './Quotation.css'
 
-type AnyRecord = Record<string, any>
+type ApiResponse = { data?: unknown }
+
+type QuotationPart = {
+  id: string
+  partId?: string
+  partNumber?: string | null
+  partName?: string | null
+  name?: string | null
+  description?: string | null
+  materialGrade?: string | null
+  quantity?: number | string
+  unitPrice?: number | string
+  totalPrice?: number | string
+  part?: {
+    partNumber?: string | null
+    partName?: string | null
+  }
+}
+
+type CostingVolume = {
+  annualVolume?: number | string
+  quantity?: number | string
+  unitPrice?: number | string
+}
+
+type CostingOption = {
+  id: string
+  version?: number | string
+  createdAt?: string
+  volumes?: CostingVolume[] | Record<string, CostingVolume | number | string>
+}
+
+const isCostingVolume = (
+  value: CostingVolume | number | string,
+): value is CostingVolume => typeof value === 'object' && value !== null
+
+type RFQ = {
+  id: string
+  rfqNumber?: string
+  customer?: { name?: string }
+  parts?: QuotationPart[]
+}
+
+type Quotation = {
+  id: string
+  quotationNumber?: string
+  customer?: { name?: string }
+  rfq?: { rfqNumber?: string }
+  createdAt?: string
+  grandTotal?: number | string
+  subtotal?: number | string
+  gstAmount?: number | string
+  validUntil?: string | null
+  status?: string
+  notes?: string | null
+  paymentTerms?: string | null
+  deliveryTerms?: string | null
+  commercialTerms?: string | null
+  parts?: QuotationPart[]
+}
+
+type StoredUser = { role?: string }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
+
+const getErrorMessage = (error: unknown, fallback: string) =>
+  axios.isAxiosError<{ message?: string }>(error)
+    ? error.response?.data?.message || fallback
+    : fallback
 
 const money = (value: number | string | null | undefined) =>
   `₹${Number(value || 0).toLocaleString('en-IN', {
@@ -14,17 +84,48 @@ const money = (value: number | string | null | undefined) =>
     maximumFractionDigits: 2,
   })}`
 
-const getList = (response: AnyRecord): AnyRecord[] => {
-  const body = response?.data
-  if (Array.isArray(body)) return body
-  if (Array.isArray(body?.data)) return body.data
-  if (Array.isArray(body?.data?.data)) return body.data.data
-  if (Array.isArray(body?.quotations)) return body.quotations
+const getList = <T,>(response: ApiResponse): T[] => {
+  const body = response.data
+  if (Array.isArray(body)) return body as T[]
+  if (!isRecord(body)) return []
+
+  if (Array.isArray(body.data)) return body.data as T[]
+  if (isRecord(body.data) && Array.isArray(body.data.data)) {
+    return body.data.data as T[]
+  }
+  if (Array.isArray(body.quotations)) return body.quotations as T[]
+
   return []
 }
 
-const getObject = (response: AnyRecord): AnyRecord =>
-  response?.data?.data ?? response?.data ?? {}
+const getObject = <T,>(response: ApiResponse): T => {
+  const body = response.data
+  if (isRecord(body) && 'data' in body) return body.data as T
+  return (body ?? {}) as T
+}
+
+const getStoredUser = (): StoredUser => {
+  try {
+    const user: unknown = JSON.parse(localStorage.getItem('rfq_user') || '{}')
+    return isRecord(user) && typeof user.role === 'string'
+      ? { role: user.role }
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+const fetchQuotationData = async () => {
+  const [quotationResponse, rfqResponse] = await Promise.all([
+    api.get('/quotations?page=1&limit=100'),
+    api.get('/rfqs?limit=100'),
+  ])
+
+  return {
+    quotations: getList<Quotation>(quotationResponse),
+    rfqs: getList<RFQ>(rfqResponse),
+  }
+}
 
 const statusLabel = (status = '') =>
   status.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
@@ -32,20 +133,23 @@ const statusLabel = (status = '') =>
 const statusClass = (status = '') => status.toLowerCase().replaceAll('_', '-')
 
 export default function Quotation() {
-  const [quotations, setQuotations] = useState<AnyRecord[]>([])
-  const [rfqs, setRfqs] = useState<AnyRecord[]>([])
+  const [quotations, setQuotations] = useState<Quotation[]>([])
+  const [rfqs, setRfqs] = useState<RFQ[]>([])
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
   const [showCreate, setShowCreate] = useState(false)
-  const [selectedQuotation, setSelectedQuotation] = useState<AnyRecord | null>(null)
+  const [selectedQuotation, setSelectedQuotation] = useState<Quotation | null>(null)
   const [selectedRFQ, setSelectedRFQ] = useState('')
   const [validUntil, setValidUntil] = useState('')
   const [gstPercentage, setGstPercentage] = useState('18')
   const [notes, setNotes] = useState('')
-  const [costingOptions, setCostingOptions] = useState<Record<string, AnyRecord[]>>({})
+  const [paymentTerms, setPaymentTerms] = useState('')
+  const [deliveryTerms, setDeliveryTerms] = useState('')
+  const [commercialTerms, setCommercialTerms] = useState('')
+  const [costingOptions, setCostingOptions] = useState<Record<string, CostingOption[]>>({})
   const [selectedCostings, setSelectedCostings] = useState<Record<string, string>>({})
   const [selectedVolumes, setSelectedVolumes] = useState<Record<string, string>>({})
   const [loadingCostings, setLoadingCostings] = useState(false)
@@ -53,13 +157,7 @@ export default function Quotation() {
   const [actionId, setActionId] = useState('')
   const [actionError, setActionError] = useState('')
 
-  const user = useMemo(() => {
-    try {
-      return JSON.parse(localStorage.getItem('rfq_user') || '{}')
-    } catch {
-      return {}
-    }
-  }, [])
+  const user = useMemo(() => getStoredUser(), [])
 
   const role = String(user?.role || '').toUpperCase()
 
@@ -67,22 +165,41 @@ export default function Quotation() {
     setLoading(true)
     setError('')
     try {
-      const [quotationResponse, rfqResponse] = await Promise.all([
-        api.get('/quotations?page=1&limit=100'),
-        api.get('/rfqs?limit=100'),
-      ])
-      setQuotations(getList(quotationResponse))
-      setRfqs(getList(rfqResponse))
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Unable to load quotations. Please check your login and server connection.')
+      const data = await fetchQuotationData()
+      setQuotations(data.quotations)
+      setRfqs(data.rfqs)
+    } catch (error) {
+      setError(getErrorMessage(error, 'Unable to load quotations. Please check your login and server connection.'))
     } finally {
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    loadData()
-  }, [loadData])
+    let isCurrent = true
+
+    const loadInitialQuotations = async () => {
+      try {
+        const data = await fetchQuotationData()
+        if (!isCurrent) return
+
+        setQuotations(data.quotations)
+        setRfqs(data.rfqs)
+      } catch (error) {
+        if (isCurrent) {
+          setError(getErrorMessage(error, 'Unable to load quotations. Please check your login and server connection.'))
+        }
+      } finally {
+        if (isCurrent) setLoading(false)
+      }
+    }
+
+    void loadInitialQuotations()
+
+    return () => {
+      isCurrent = false
+    }
+  }, [])
 
   const filteredQuotations = useMemo(() => {
     return quotations.filter((quotation) => {
@@ -95,13 +212,16 @@ export default function Quotation() {
   }, [quotations, search, statusFilter])
 
   const chosenRFQ = rfqs.find((rfq) => rfq.id === selectedRFQ)
-  const parts: AnyRecord[] = chosenRFQ?.parts || []
+  const parts = chosenRFQ?.parts ?? []
 
   const openCreate = () => {
     setSelectedRFQ('')
     setValidUntil('')
     setGstPercentage('18')
     setNotes('')
+    setPaymentTerms('')
+    setDeliveryTerms('')
+    setCommercialTerms('')
     setCostingOptions({})
     setSelectedCostings({})
     setSelectedVolumes({})
@@ -116,7 +236,7 @@ export default function Quotation() {
     setSelectedVolumes({})
     setActionError('')
     const rfq = rfqs.find((item) => item.id === rfqId)
-    const rfqParts: AnyRecord[] = rfq?.parts || []
+    const rfqParts = rfq?.parts ?? []
     if (!rfqParts.length) {
       setActionError('This RFQ has no parts available.')
       return
@@ -127,11 +247,11 @@ export default function Quotation() {
       const results = await Promise.all(
         rfqParts.map(async (part) => {
           const response = await api.get(`/costings/part/${part.id}`)
-          const records = getList(response)
+          const records = getList<CostingOption>(response)
           return { partId: part.id, records }
         }),
       )
-      const options: Record<string, AnyRecord[]> = {}
+      const options: Record<string, CostingOption[]> = {}
       results.forEach(({ partId, records }) => {
         options[partId] = records
         if (records.length) {
@@ -151,8 +271,8 @@ export default function Quotation() {
       if (missing.length) {
         setActionError(`${missing.length} part(s) do not have saved costing records. Generate costing before creating the quotation.`)
       }
-    } catch (err: any) {
-      setActionError(err.response?.data?.message || 'Could not load saved costings for this RFQ.')
+    } catch (error) {
+      setActionError(getErrorMessage(error, 'Could not load saved costings for this RFQ.'))
     } finally {
       setLoadingCostings(false)
     }
@@ -161,15 +281,16 @@ export default function Quotation() {
   const selectedCostingFor = (partId: string) =>
     (costingOptions[partId] || []).find((item) => item.id === selectedCostings[partId])
 
-  const volumesFor = (partId: string): AnyRecord[] => {
+  const volumesFor = (partId: string): CostingVolume[] => {
     const costing = selectedCostingFor(partId)
     if (!costing) return []
     if (Array.isArray(costing.volumes)) return costing.volumes
     if (costing.volumes && typeof costing.volumes === 'object') {
-      return Object.entries(costing.volumes).map(([key, value]) => ({
-        annualVolume: Number(key),
-        ...(typeof value === 'object' ? value : { unitPrice: value }),
-      }))
+      return Object.entries(costing.volumes).map(([key, value]): CostingVolume =>
+        isCostingVolume(value)
+          ? { annualVolume: Number(key), ...value }
+          : { annualVolume: Number(key), unitPrice: value },
+      )
     }
     return []
   }
@@ -202,19 +323,22 @@ export default function Quotation() {
         ...(validUntil ? { validUntil } : {}),
         gstPercentage: Number(gstPercentage),
         notes: notes.trim() || undefined,
+        paymentTerms: paymentTerms.trim() || undefined,
+        deliveryTerms: deliveryTerms.trim() || undefined,
+        commercialTerms: commercialTerms.trim() || undefined,
         parts: quotationParts,
       })
       setShowCreate(false)
       await loadData()
-    } catch (err: any) {
-      setActionError(err.response?.data?.message || 'Quotation could not be created.')
+    } catch (error) {
+      setActionError(getErrorMessage(error, 'Quotation could not be created.'))
     } finally {
       setSaving(false)
     }
   }
 
   const runAction = async (
-    quotation: AnyRecord,
+    quotation: Quotation,
     action: 'submit' | 'approve' | 'reject' | 'send',
   ) => {
     setActionId(quotation.id)
@@ -233,26 +357,26 @@ export default function Quotation() {
       await loadData()
       if (selectedQuotation?.id === quotation.id) {
         const response = await api.get(`/quotations/${quotation.id}`)
-        setSelectedQuotation(getObject(response))
+        setSelectedQuotation(getObject<Quotation>(response))
       }
-    } catch (err: any) {
-      setActionError(err.response?.data?.message || `Unable to ${action} this quotation.`)
+    } catch (error) {
+      setActionError(getErrorMessage(error, `Unable to ${action} this quotation.`))
     } finally {
       setActionId('')
     }
   }
 
-  const openDetails = async (quotation: AnyRecord) => {
+  const openDetails = async (quotation: Quotation) => {
     setActionError('')
     try {
       const response = await api.get(`/quotations/${quotation.id}`)
-      setSelectedQuotation(getObject(response))
-    } catch (err: any) {
-      setActionError(err.response?.data?.message || 'Could not load quotation details.')
+      setSelectedQuotation(getObject<Quotation>(response))
+    } catch (error) {
+      setActionError(getErrorMessage(error, 'Could not load quotation details.'))
     }
   }
 
-  const downloadQuotationPdf = async (quotation: AnyRecord) => {
+  const downloadQuotationPdf = async (quotation: Quotation) => {
     setActionId(quotation.id)
     setActionError('')
 
@@ -436,6 +560,19 @@ export default function Quotation() {
               <textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)}
                 placeholder="Add commercial notes or special conditions..." />
             </label>
+            <label className="quotation-field">Payment terms
+              <textarea rows={2} value={paymentTerms} onChange={(event) => setPaymentTerms(event.target.value)}
+                placeholder="For example: payment schedule, credit period or advance requirement" />
+            </label>
+            <label className="quotation-field">Delivery terms
+              <textarea rows={2} value={deliveryTerms} onChange={(event) => setDeliveryTerms(event.target.value)}
+                placeholder="For example: lead time, delivery point and dispatch terms" />
+            </label>
+            <label className="quotation-field">Other commercial conditions
+              <textarea rows={2} value={commercialTerms} onChange={(event) => setCommercialTerms(event.target.value)}
+                placeholder="Add conditions that should appear in the quotation PDF" />
+            </label>
+            <p>Quotation submission and sending require Plant Head approval of each current routing revision and a costing from that revision. Manage technical review in the Costing workspace.</p>
             {actionError && <div className="quotation-alert"><AlertCircle size={16} />{actionError}</div>}
             <div className="quotation-modal-actions">
               <button className="quotation-button secondary" onClick={() => setShowCreate(false)}>Cancel</button>
@@ -467,7 +604,7 @@ export default function Quotation() {
             <div className="quotation-table-wrap">
               <table className="quotation-table">
                 <thead><tr><th>Part</th><th>Quantity</th><th>Unit price</th><th>Total</th></tr></thead>
-                <tbody>{(selectedQuotation.parts || []).map((line: AnyRecord) => (
+                <tbody>{(selectedQuotation.parts || []).map((line) => (
                   <tr key={line.id}>
                     <td>{line.part?.partNumber || line.part?.partName || line.partId}</td>
                     <td>{Number(line.quantity || 0).toLocaleString('en-IN')}</td>
@@ -477,6 +614,13 @@ export default function Quotation() {
               </table>
             </div>
             {selectedQuotation.notes && <p className="quotation-detail-notes">{selectedQuotation.notes}</p>}
+            {(selectedQuotation.paymentTerms || selectedQuotation.deliveryTerms || selectedQuotation.commercialTerms) && (
+              <div className="quotation-detail-notes">
+                {selectedQuotation.paymentTerms && <p><strong>Payment terms:</strong> {selectedQuotation.paymentTerms}</p>}
+                {selectedQuotation.deliveryTerms && <p><strong>Delivery terms:</strong> {selectedQuotation.deliveryTerms}</p>}
+                {selectedQuotation.commercialTerms && <p><strong>Other commercial conditions:</strong> {selectedQuotation.commercialTerms}</p>}
+              </div>
+            )}
             <div className="quotation-modal-actions quotation-action-row">
               {(selectedQuotation.status === 'APPROVED' || selectedQuotation.status === 'SENT') &&
                 <button
@@ -487,14 +631,14 @@ export default function Quotation() {
                   <Printer size={16} /> Download PDF
                 </button>}
               {selectedQuotation.status === 'DRAFT' && (role === 'ESTIMATOR' || role === 'ADMIN') &&
-                <button className="quotation-button primary" disabled={actionId === selectedQuotation.id} onClick={() => runAction(selectedQuotation, 'submit')}><Clock size={16} /> Submit for approval</button>}
+                <button className="quotation-button primary" disabled={actionId === selectedQuotation.id} onClick={() => runAction(selectedQuotation, 'submit')}><Clock size={16} /> Submit for commercial approval</button>}
               {selectedQuotation.status === 'PENDING_APPROVAL' && role === 'SALES_HEAD' &&
                 <>
                   <button className="quotation-button danger" disabled={actionId === selectedQuotation.id} onClick={() => runAction(selectedQuotation, 'reject')}><XCircle size={16} /> Reject</button>
                   <button className="quotation-button primary" disabled={actionId === selectedQuotation.id} onClick={() => runAction(selectedQuotation, 'approve')}><CheckCircle size={16} /> Approve</button>
                 </>}
-              {selectedQuotation.status === 'APPROVED' && (role === 'ESTIMATOR' || role === 'ADMIN') &&
-                <button className="quotation-button primary" disabled={actionId === selectedQuotation.id} onClick={() => runAction(selectedQuotation, 'send')}><Send size={16} /> Mark as sent</button>}
+              {selectedQuotation.status === 'APPROVED' && role === 'SALES_HEAD' &&
+                <button className="quotation-button primary" disabled={actionId === selectedQuotation.id} onClick={() => runAction(selectedQuotation, 'send')}><Send size={16} /> Mark as sent internally</button>}
             </div>
             {actionError && <div className="quotation-alert"><AlertCircle size={16} />{actionError}</div>}
           </section>

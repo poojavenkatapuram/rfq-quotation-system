@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import { Calculator, RefreshCw, Save, Plus, Trash2, History } from 'lucide-react'
 import api from '../../services/api'
+import { useAuth } from '../../context/auth-context'
 import './Costing.css'
 
 type Part = {
@@ -55,6 +56,34 @@ type Operation = {
   setupTimeMin: number
 }
 
+type RoutingRecommendation = {
+  sourceRoutingRevision: number
+  sourcePartId: string
+  sourcePartNumber: string | null
+  sourcePartName: string
+  sourceMaterialGrade: string | null
+  sourceWeightKg: number | null
+  sourceRfqNumber: string
+  similarityScore: number
+  matchingFactors: {
+    materialGradeMatch: boolean
+    partNameSimilarity: number
+    weightSimilarity: number
+  }
+  operations: Array<{
+    sequence: number
+    operationName: string
+    cycleTimeMin: number
+    setupTimeMin: number | null
+    machineRateId: string | null
+    machineRate: {
+      machineCode: string
+      machineName: string
+      ratePerHour: number
+    } | null
+  }>
+}
+
 type CostingComponent = {
   id?: string
   type: string
@@ -72,6 +101,7 @@ type CostingVolume = {
 type CostingRecord = {
   id: string
   version: number
+  routingRevision?: number | null
   totalCost: number | string
   profitMargin: number | string
   assumptions?: string | null
@@ -107,13 +137,105 @@ const isCurrentlyEffective = (
   )
 }
 
+type InitialCostingData = {
+  rfqs: RFQ[]
+  materialRates: MaterialRate[]
+  machineRates: MachineRate[]
+}
+
+type TechnicalReview = {
+  id: string
+  routingRevision: number
+  status: 'PENDING' | 'APPROVED' | 'REJECTED'
+  comments: string | null
+  submittedAt: string
+  reviewedAt: string | null
+  reviewedBy?: { name: string } | null
+  submittedSnapshot: {
+    routing?: { operations?: Array<Operation & { machineRate?: { machineCode: string; machineName: string; ratePerHour: number | string } | null }> }
+    saveProvenance?: { recommendationSource?: { sourcePartName?: string; sourceRfqNumber?: string; sourceRoutingRevision?: number } } | null
+  }
+}
+
+type RoutingState = {
+  partId: string
+  revision: number
+  technicalReviews: TechnicalReview[]
+}
+
+type PartCostingData = {
+  routing: RoutingState | null
+  recommendationError: boolean
+  operations: Operation[]
+  recommendations: RoutingRecommendation[]
+  history: CostingRecord[]
+}
+
+const fetchInitialCostingData = async (): Promise<InitialCostingData> => {
+  const [rfqResponse, materialResponse, machineResponse] = await Promise.all([
+    api.get('/rfqs?limit=100'),
+    api.get('/material-rates?isActive=true'),
+    api.get('/machine-rates?isActive=true'),
+  ])
+
+  return {
+    rfqs: rfqResponse.data.data ?? [],
+    materialRates: materialResponse.data.data ?? [],
+    machineRates: machineResponse.data.data ?? [],
+  }
+}
+
+const fetchPartCostingData = async (partId: string): Promise<PartCostingData> => {
+  const [routingResponse, historyResponse, recommendationResponse] = await Promise.all([
+    api.get(`/routings/part/${partId}`).catch((error) => {
+      if (error.response?.status === 404) return null
+      throw error
+    }),
+    api.get(`/costings/part/${partId}`),
+    api.get(`/routings/recommendations/${partId}`).catch((error) => {
+      console.error('Historical routing recommendations unavailable:', error)
+      return null
+    }),
+  ])
+
+  const routing = routingResponse?.data?.data
+
+  return {
+    routing: routing ? { ...routing, partId } : null,
+    recommendationError: !recommendationResponse,
+    operations: routing?.operations
+      ? routing.operations.map((operation: Operation) => ({
+          sequence: operation.sequence,
+          operationName: operation.operationName,
+          machineRateId: operation.machineRateId,
+          cycleTimeMin: Number(operation.cycleTimeMin),
+          setupTimeMin: Number(operation.setupTimeMin ?? 0),
+        }))
+      : [],
+    recommendations: recommendationResponse?.data?.data?.recommendations ?? [],
+    history: historyResponse.data.data ?? [],
+  }
+}
+
 export default function Costing() {
+  const { user } = useAuth()
+  const canEditRouting = ['ESTIMATOR', 'PLANT_HEAD', 'ADMIN'].includes(user?.role ?? '')
+  const canEstimate = ['ESTIMATOR', 'ADMIN'].includes(user?.role ?? '')
+  const [routingState, setRoutingState] = useState<RoutingState | null>(null)
+  const [loadedPartId, setLoadedPartId] = useState('')
+  const [savedOperations, setSavedOperations] = useState<Operation[]>([])
+  const [recommendationSource, setRecommendationSource] = useState<{ sourcePartId: string; sourceRoutingRevision: number } | undefined>(undefined)
+  const [recommendationError, setRecommendationError] = useState(false)
+  const [reviewComments, setReviewComments] = useState('')
+  const [routingBusy, setRoutingBusy] = useState(false)
   const [rfqs, setRfqs] = useState<RFQ[]>([])
   const [materialRates, setMaterialRates] = useState<MaterialRate[]>([])
   const [machineRates, setMachineRates] = useState<MachineRate[]>([])
   const [selectedRFQId, setSelectedRFQId] = useState('')
   const [selectedPartId, setSelectedPartId] = useState('')
   const [operations, setOperations] = useState<Operation[]>([])
+  const [recommendations, setRecommendations] = useState<RoutingRecommendation[]>([])
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false)
 
   const [scrapPercentage, setScrapPercentage] = useState(0)
   const [overheadAmount, setOverheadAmount] = useState(0)
@@ -136,6 +258,11 @@ export default function Costing() {
     (part) => part.id === selectedPartId,
   )
 
+  const partLoaded = loadedPartId === selectedPartId && Boolean(selectedPartId)
+  const currentRouting = routingState?.partId === selectedPartId ? routingState : null
+  const currentReview = currentRouting?.technicalReviews.find(review => review.routingRevision === currentRouting.revision)
+  const routingDirty = JSON.stringify(operations) !== JSON.stringify(savedOperations)
+
   const availableMaterialRates = useMemo(
     () => materialRates.filter(isCurrentlyEffective),
     [materialRates],
@@ -146,31 +273,40 @@ export default function Costing() {
     [machineRates],
   )
 
-  const matchingMaterialRates = useMemo(() => {
-    if (!selectedPart?.materialGrade) return []
-
-    return availableMaterialRates.filter(
-      (rate) =>
-        rate.grade.trim().toLowerCase() ===
-        selectedPart.materialGrade?.trim().toLowerCase(),
-    )
-  }, [availableMaterialRates, selectedPart])
+  const matchingMaterialRates = selectedPart?.materialGrade
+    ? availableMaterialRates.filter(
+        (rate) =>
+          rate.grade.trim().toLowerCase() ===
+          selectedPart.materialGrade?.trim().toLowerCase(),
+      )
+    : []
 
   const loadInitialData = async () => {
+    if (routingDirty && partLoaded) {
+      setError('Save your routing edits before refreshing, or select the part again to reload the saved version.')
+      return
+    }
     setLoading(true)
     setError('')
 
     try {
-      const [rfqResponse, materialResponse, machineResponse] =
-        await Promise.all([
-          api.get('/rfqs?limit=100'),
-          api.get('/material-rates?isActive=true'),
-          api.get('/machine-rates?isActive=true'),
-        ])
-
-      setRfqs(rfqResponse.data.data ?? [])
-      setMaterialRates(materialResponse.data.data ?? [])
-      setMachineRates(machineResponse.data.data ?? [])
+      const data = await fetchInitialCostingData()
+      setRfqs(data.rfqs)
+      setMaterialRates(data.materialRates)
+      setMachineRates(data.machineRates)
+      if (selectedPartId) {
+        const partData = await fetchPartCostingData(selectedPartId)
+        setOperations(partData.operations)
+        setSavedOperations(partData.operations)
+        setRoutingState(partData.routing)
+        setLoadedPartId(selectedPartId)
+        setRecommendationSource(undefined)
+        setRecommendationError(partData.recommendationError)
+        setRecommendations(partData.recommendations)
+        setHistory(partData.history)
+        setLatestResult(partData.history[0] ?? null)
+        setReviewComments('')
+      }
     } catch (err) {
       setError(getErrorMessage(err))
     } finally {
@@ -178,60 +314,86 @@ export default function Costing() {
     }
   }
 
-  const loadPartDetails = async (partId: string) => {
-    setError('')
-    setNotice('')
-    setLatestResult(null)
-    setHistory([])
-    setOperations([])
-
-    if (!partId) return
-
-    try {
-      const [routingResponse, historyResponse] = await Promise.all([
-        api.get(`/routings/part/${partId}`).catch((err) => {
-          if (err.response?.status === 404) return null
-          throw err
-        }),
-        api.get(`/costings/part/${partId}`),
-      ])
-
-      const routing = routingResponse?.data?.data
-
-      if (routing?.operations) {
-        setOperations(
-          routing.operations.map((operation: Operation) => ({
-            sequence: operation.sequence,
-            operationName: operation.operationName,
-            machineRateId: operation.machineRateId,
-            cycleTimeMin: Number(operation.cycleTimeMin),
-            setupTimeMin: Number(operation.setupTimeMin ?? 0),
-          })),
-        )
-      }
-
-      const records: CostingRecord[] = historyResponse.data.data ?? []
-      setHistory(records)
-      if (records.length > 0) setLatestResult(records[0])
-    } catch (err) {
-      setError(getErrorMessage(err))
-    }
-  }
-
   useEffect(() => {
-    void loadInitialData()
+    let isCurrent = true
+
+    const loadInitialCostingData = async () => {
+      try {
+        const data = await fetchInitialCostingData()
+
+        if (!isCurrent) return
+
+        setRfqs(data.rfqs)
+        setMaterialRates(data.materialRates)
+        setMachineRates(data.machineRates)
+      } catch (error) {
+        if (isCurrent) setError(getErrorMessage(error))
+      } finally {
+        if (isCurrent) setLoading(false)
+      }
+    }
+
+    void loadInitialCostingData()
+
+    return () => {
+      isCurrent = false
+    }
   }, [])
 
   useEffect(() => {
-    if (selectedPartId) void loadPartDetails(selectedPartId)
+    if (!selectedPartId) return
+
+    let isCurrent = true
+
+    const loadSelectedPart = async () => {
+      try {
+        const data = await fetchPartCostingData(selectedPartId)
+
+        if (!isCurrent) return
+
+        setOperations(data.operations)
+        setSavedOperations(data.operations)
+        setRoutingState(data.routing)
+        setLoadedPartId(selectedPartId)
+        setRecommendationSource(undefined)
+        setReviewComments('')
+        setRecommendationError(data.recommendationError)
+        setRecommendations(data.recommendations)
+        setHistory(data.history)
+        setLatestResult(data.history[0] ?? null)
+      } catch (error) {
+        if (isCurrent) setError(getErrorMessage(error))
+      } finally {
+        if (isCurrent) setRecommendationsLoading(false)
+      }
+    }
+
+    void loadSelectedPart()
+
+    return () => {
+      isCurrent = false
+    }
   }, [selectedPartId])
 
   const handleRFQChange = (rfqId: string) => {
+    setLoadedPartId('')
     setSelectedRFQId(rfqId)
     setSelectedPartId('')
     setLatestResult(null)
     setHistory([])
     setOperations([])
+  }
+
+  const handlePartChange = (partId: string) => {
+    setLoadedPartId('')
+    setSelectedPartId(partId)
+    setError('')
+    setNotice('')
+    setLatestResult(null)
+    setHistory([])
+    setOperations([])
+    setRecommendations([])
+    setRecommendationsLoading(Boolean(partId))
   }
 
   const handleAssignMaterialRate = async (materialRateId: string) => {
@@ -301,8 +463,31 @@ export default function Costing() {
     )
   }
 
+  const applyRecommendation = (recommendation: RoutingRecommendation) => {
+    const mappedOperations = recommendation.operations.map((operation, index) => {
+      const machineRate = availableMachineRates.find(
+        (rate) => rate.id === operation.machineRateId,
+      )
+
+      return {
+        sequence: index + 1,
+        operationName: operation.operationName,
+        machineRateId: machineRate?.id ?? '',
+        cycleTimeMin: operation.cycleTimeMin,
+        setupTimeMin: operation.setupTimeMin ?? 0,
+      }
+    })
+
+    setRecommendationSource({ sourcePartId: recommendation.sourcePartId, sourceRoutingRevision: recommendation.sourceRoutingRevision })
+    setOperations(mappedOperations)
+    setNotice(
+      'Historical routing copied for review. Verify machine rates and timings, then save the routing.',
+    )
+    setError('')
+  }
+
   const saveRouting = async () => {
-    if (!selectedPart) return
+    if (!selectedPart || !partLoaded || routingBusy) return
 
     if (
       operations.length === 0 ||
@@ -320,8 +505,11 @@ export default function Costing() {
     setError('')
     setNotice('')
 
+    setRoutingBusy(true)
     try {
-      await api.put(`/routings/part/${selectedPart.id}`, {
+      const response = await api.put(`/routings/part/${selectedPart.id}`, {
+        expectedRevision: currentRouting?.revision ?? 0,
+        recommendationSource,
         name: 'Standard machining',
         operations: operations.map((operation, index) => ({
           ...operation,
@@ -329,14 +517,44 @@ export default function Costing() {
         })),
       })
 
-      setNotice('Routing saved successfully.')
+      setRoutingState({ ...response.data.data, partId: selectedPart.id, technicalReviews: currentRouting?.technicalReviews ?? [] })
+      setSavedOperations(operations)
+      setRecommendationSource(undefined)
+      setNotice('New routing revision saved as draft. Submit it for Plant Head technical review.')
     } catch (err) {
       setError(getErrorMessage(err))
+    } finally {
+      setRoutingBusy(false)
+    }
+  }
+
+  const handleReview = async (status?: 'APPROVED' | 'REJECTED') => {
+    if (!selectedPart || !currentRouting || !partLoaded || routingDirty || routingBusy) return
+    if (status === 'REJECTED' && !reviewComments.trim()) {
+      setError('Enter comments explaining the requested changes.')
+      return
+    }
+    setRoutingBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      const response = await api.post(`/routings/part/${selectedPart.id}/review${status ? '/decision' : ''}`, {
+        expectedRevision: currentRouting.revision,
+        ...(status ? { status, comments: reviewComments.trim() } : {}),
+      })
+      const review: TechnicalReview = response.data.data
+      setRoutingState({ ...currentRouting, technicalReviews: [review, ...currentRouting.technicalReviews.filter(item => item.id !== review.id)] })
+      setReviewComments('')
+      setNotice(status === 'REJECTED' ? 'Changes requested. Save a new routing revision before resubmitting.' : status === 'APPROVED' ? 'Technical review approved. Sales Head commercial approval remains separate.' : 'Routing submitted for Plant Head technical review.')
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setRoutingBusy(false)
     }
   }
 
   const handleGenerateCosting = async () => {
-    if (!selectedPart) return
+    if (!selectedPart || !partLoaded || routingDirty || !currentRouting) return
 
     if (!selectedPart.materialRateId) {
       setError('Assign a material rate before generating costing.')
@@ -423,6 +641,7 @@ export default function Costing() {
 
         <button
           className="costing-secondary-button"
+          disabled={routingBusy || saving}
           onClick={() => void loadInitialData()}
         >
           <RefreshCw size={16} />
@@ -438,6 +657,7 @@ export default function Costing() {
           <span>Select RFQ</span>
           <select
             value={selectedRFQId}
+            disabled={routingBusy || saving}
             onChange={(event) => handleRFQChange(event.target.value)}
           >
             <option value="">Choose an RFQ</option>
@@ -453,8 +673,8 @@ export default function Costing() {
           <span>Select part</span>
           <select
             value={selectedPartId}
-            onChange={(event) => setSelectedPartId(event.target.value)}
-            disabled={!selectedRFQ}
+            onChange={(event) => handlePartChange(event.target.value)}
+            disabled={!selectedRFQ || routingBusy || saving}
           >
             <option value="">Choose a part</option>
             {selectedRFQ?.parts.map((part) => (
@@ -512,6 +732,7 @@ export default function Costing() {
             </div>
           </section>
 
+          {!partLoaded && <p role="status">Loading routing and review status...</p>}
           <section className="costing-panel">
             <div className="costing-panel-heading">
               <div>
@@ -523,6 +744,7 @@ export default function Costing() {
             <label className="costing-field">
               <span>Assign material rate</span>
               <select
+                disabled={!canEditRouting || !partLoaded || routingBusy}
                 value={selectedPart.materialRateId ?? ''}
                 onChange={(event) =>
                   void handleAssignMaterialRate(event.target.value)
@@ -557,7 +779,7 @@ export default function Costing() {
                 <span className="costing-eyebrow">STEP 2</span>
                 <h2>Routing operations</h2>
               </div>
-              <button className="costing-secondary-button" onClick={addOperation}>
+              <button className="costing-secondary-button" disabled={!canEditRouting || !partLoaded || routingBusy} onClick={addOperation}>
                 <Plus size={16} />
                 Add operation
               </button>
@@ -576,6 +798,7 @@ export default function Costing() {
                     <label className="costing-field">
                       <span>Operation</span>
                       <input
+                        disabled={!canEditRouting || !partLoaded || routingBusy}
                         value={operation.operationName}
                         onChange={(event) =>
                           updateOperation(index, 'operationName', event.target.value)
@@ -587,6 +810,7 @@ export default function Costing() {
                     <label className="costing-field">
                       <span>Machine rate</span>
                       <select
+                        disabled={!canEditRouting || !partLoaded || routingBusy}
                         value={operation.machineRateId}
                         onChange={(event) =>
                           updateOperation(index, 'machineRateId', event.target.value)
@@ -608,6 +832,7 @@ export default function Costing() {
                         type="number"
                         min="0.01"
                         step="0.01"
+                        disabled={!canEditRouting || !partLoaded || routingBusy}
                         value={operation.cycleTimeMin}
                         onChange={(event) =>
                           updateOperation(index, 'cycleTimeMin', Number(event.target.value))
@@ -621,6 +846,7 @@ export default function Costing() {
                         type="number"
                         min="0"
                         step="0.01"
+                        disabled={!canEditRouting || !partLoaded || routingBusy}
                         value={operation.setupTimeMin}
                         onChange={(event) =>
                           updateOperation(index, 'setupTimeMin', Number(event.target.value))
@@ -630,6 +856,7 @@ export default function Costing() {
 
                     <button
                       className="costing-icon-button"
+                      disabled={!canEditRouting || !partLoaded || routingBusy}
                       onClick={() => removeOperation(index)}
                       aria-label="Remove operation"
                       title="Remove operation"
@@ -642,11 +869,140 @@ export default function Costing() {
             )}
 
             <div className="costing-panel-actions">
-              <button className="costing-primary-button" onClick={() => void saveRouting()}>
+              <button className="costing-primary-button" disabled={!canEditRouting || !partLoaded || routingBusy} onClick={() => void saveRouting()}>
                 <Save size={16} />
                 Save routing
               </button>
             </div>
+          </section>
+
+          <section className="costing-panel" aria-label="Plant Head technical review">
+            <h2>Plant Head technical review</h2>
+            <p role="status">{partLoaded ? `Routing revision ${currentRouting?.revision ?? 'not saved'} · ${currentReview?.status === 'REJECTED' ? 'Changes requested' : currentReview?.status ?? 'Draft'}` : 'Loading review status...'}</p>
+            <p className="costing-muted">Draft costings can be saved before approval. The current routing revision must be approved by a Plant Head before quotation submission or sending. Sales Head commercial approval is separate.</p>
+            {routingDirty && <p role="status">Unsaved routing changes. Save a new revision before review or costing.</p>}
+            {currentReview?.comments && <p>Review comments: {currentReview.comments}</p>}
+            {canEstimate && <button className="costing-primary-button" disabled={!partLoaded || !currentRouting || Boolean(currentReview) || routingDirty || routingBusy} onClick={() => void handleReview()}>Submit for technical review</button>}
+            {user?.role === 'PLANT_HEAD' && currentReview?.status === 'PENDING' && <>
+              <label className="costing-field"><span>Technical review comments (required to request changes)</span><textarea maxLength={2000} value={reviewComments} onChange={event => setReviewComments(event.target.value)} disabled={routingBusy} /></label>
+              <div className="costing-panel-actions">
+                <button className="costing-primary-button" disabled={!partLoaded || routingDirty || routingBusy} onClick={() => void handleReview('APPROVED')}>Approve technical routing</button>
+                <button className="costing-secondary-button" disabled={!partLoaded || routingDirty || routingBusy || !reviewComments.trim()} onClick={() => void handleReview('REJECTED')}>Request changes</button>
+              </div>
+            </>}
+            {currentReview?.status === 'REJECTED' && <p>Save a new revision, then submit it for review.</p>}
+            <details><summary>Technical review history ({currentRouting?.technicalReviews.length ?? 0})</summary>
+              {currentRouting?.technicalReviews.map(review => <article key={review.id}>
+                <h3>Revision {review.routingRevision} · {review.status === 'REJECTED' ? 'Changes requested' : review.status}</h3>
+                <p>Submitted {new Date(review.submittedAt).toLocaleString('en-IN')}{review.reviewedAt ? ` · Reviewed ${new Date(review.reviewedAt).toLocaleString('en-IN')} by ${review.reviewedBy?.name ?? 'Plant Head'}` : ''}</p>
+                {review.comments && <p>{review.comments}</p>}
+                {review.submittedSnapshot?.routing?.operations?.map((operation, index) => <p key={index}>{operation.sequence}. {operation.operationName} · {operation.machineRate ? `${operation.machineRate.machineCode} — ${operation.machineRate.machineName} (${money(operation.machineRate.ratePerHour)}/hr at submission)` : 'Machine rate not recorded'} · Cycle {Number(operation.cycleTimeMin)} min · Setup {Number(operation.setupTimeMin ?? 0)} min</p>)}
+                {review.submittedSnapshot?.saveProvenance?.recommendationSource && <p>Historical source: {review.submittedSnapshot.saveProvenance.recommendationSource.sourcePartName} · RFQ {review.submittedSnapshot.saveProvenance.recommendationSource.sourceRfqNumber} · Routing revision {review.submittedSnapshot.saveProvenance.recommendationSource.sourceRoutingRevision}</p>}
+              </article>)}
+            </details>
+          </section>
+
+          <section className="costing-panel">
+            <div className="costing-panel-heading">
+              <div>
+                <span className="costing-eyebrow">HISTORICAL REFERENCE</span>
+                <h2>Similar part routings</h2>
+                <p className="costing-muted">
+                  Historical similarity ranking, not an AI prediction. Review every
+                  suggested operation before saving.
+                </p>
+              </div>
+            </div>
+
+            {recommendationsLoading ? (
+              <p className="costing-muted">Searching historical routings...</p>
+            ) : recommendationError ? (
+              <p role="alert">Historical recommendations could not be loaded. Select the part again to retry.</p>
+            ) : recommendations.length === 0 ? (
+              <p className="costing-muted">
+                No historical parts with saved routing operations were found.
+              </p>
+            ) : (
+              <div className="costing-operation-list">
+                {recommendations.map((recommendation) => (
+                  <article
+                    key={recommendation.sourcePartId}
+                    className="costing-panel"
+                  >
+                    <div className="costing-panel-heading">
+                      <div>
+                        <h3>{recommendation.sourcePartName}</h3>
+                        <p className="costing-muted">
+                          Source RFQ: {recommendation.sourceRfqNumber}
+                          {recommendation.sourcePartNumber
+                            ? ` · Part: ${recommendation.sourcePartNumber}`
+                            : ''}
+                        </p>
+                      </div>
+                      <strong>{recommendation.similarityScore}% match</strong>
+                    </div>
+
+                    <p className="costing-muted">
+                      Material: {recommendation.sourceMaterialGrade || 'Not recorded'}
+                      {' · '}
+                      Weight: {recommendation.sourceWeightKg ?? 'Not recorded'} kg
+                      {' · '}
+                      Material match: {recommendation.matchingFactors.materialGradeMatch ? 'Yes' : 'No'}
+                      {' · '}
+                      Name similarity: {recommendation.matchingFactors.partNameSimilarity}%
+                    </p>
+
+                    <div className="costing-operation-list">
+                      {recommendation.operations.map((operation) => {
+                        const currentRate = availableMachineRates.find(
+                          (rate) => rate.id === operation.machineRateId,
+                        )
+
+                        return (
+                          <div
+                            className="costing-operation-row"
+                            key={`${recommendation.sourcePartId}-${operation.sequence}`}
+                          >
+                            <span className="costing-operation-number">
+                              {operation.sequence}
+                            </span>
+                            <div>
+                              <strong>{operation.operationName}</strong>
+                              <p className="costing-muted">
+                                {operation.cycleTimeMin} min cycle ·{' '}
+                                {operation.setupTimeMin ?? 0} min setup
+                              </p>
+                            </div>
+                            <div>
+                              <strong>
+                                {operation.machineRate
+                                  ? `${operation.machineRate.machineCode} — ${operation.machineRate.machineName}`
+                                  : 'Machine rate unavailable'}
+                              </strong>
+                              <p className="costing-muted">
+                                {currentRate
+                                  ? `${money(currentRate.ratePerHour)}/hr · currently effective`
+                                  : 'Historical rate unavailable or no longer effective'}
+                              </p>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    <div className="costing-panel-actions">
+                      <button
+                        className="costing-secondary-button"
+                        disabled={!canEditRouting || !partLoaded || routingBusy}
+                        onClick={() => applyRecommendation(recommendation)}
+                      >
+                        Use this routing for review
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
           </section>
 
           <section className="costing-panel">
@@ -740,10 +1096,10 @@ export default function Costing() {
               <button
                 className="costing-primary-button"
                 onClick={() => void handleGenerateCosting()}
-                disabled={saving}
+                disabled={saving || !canEstimate || !partLoaded || !currentRouting || routingDirty || routingBusy}
               >
                 <Calculator size={16} />
-                {saving ? 'Generating...' : 'Generate and save costing'}
+                {saving ? 'Generating...' : 'Generate and save draft costing'}
               </button>
             </div>
           </section>
@@ -761,7 +1117,7 @@ export default function Costing() {
               </div>
 
               <p className="costing-muted">
-                Saved on {new Date(latestResult.createdAt).toLocaleString('en-IN')}
+                Saved on {new Date(latestResult.createdAt).toLocaleString('en-IN')} · Routing revision {latestResult.routingRevision ?? 'not recorded (legacy costing)'}
               </p>
 
               <div className="costing-breakdown">

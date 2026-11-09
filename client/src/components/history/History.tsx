@@ -1,55 +1,161 @@
 import { useCallback, useEffect, useState } from 'react'
+import axios from 'axios'
 import { Search, RefreshCw, Upload, History as HistoryIcon, FileText, Calculator } from 'lucide-react'
 import api from '../../services/api'
 import './History.css'
 
-type RecordItem = Record<string, any>
 type Tab = 'quotations' | 'costings' | 'imported'
 
-const money = (value: number | string | null) =>
+type Money = number | string | null | undefined
+
+type HistoryPart = {
+  id: string
+  part?: { name?: string }
+  partName?: string
+  partNumber?: string
+  materialGrade?: string
+  quantity?: number | string
+  unitPrice?: Money
+  totalPrice?: Money
+}
+
+type HistoryVolume = {
+  id: string
+  annualVolume?: number | string
+  unitPrice?: Money
+  totalCost?: Money
+}
+
+type HistoryComponent = {
+  id: string
+  type?: string
+  amount?: Money
+}
+
+type HistoryRecord = {
+  id: string
+  quotationNumber?: string
+  customer?: { name?: string }
+  customerName?: string
+  rfq?: { rfqNumber?: string }
+  rfqNumber?: string
+  status?: string
+  subtotal?: Money
+  gstAmount?: Money
+  grandTotal?: Money
+  createdAt?: string
+  quoteDate?: string
+  validUntil?: string
+  sourceFile?: string
+  version?: number
+  part?: {
+    name?: string
+    partNumber?: string
+    materialGrade?: string
+    rfq?: { rfqNumber?: string }
+  }
+  parts?: HistoryPart[]
+  volumes?: HistoryVolume[]
+  components?: HistoryComponent[]
+}
+
+type ImportResult = {
+  summary?: {
+    totalValidQuotations?: number
+    imported?: number
+    skipped?: number
+    invalidRows?: number
+  }
+}
+
+type HistoryResponse = {
+  data?: HistoryRecord[]
+  pagination?: { totalPages?: number }
+}
+
+const money = (value: Money) =>
   `₹${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
 
 const date = (value?: string) =>
   value ? new Date(value).toLocaleDateString('en-IN') : '—'
 
+const getErrorMessage = (error: unknown, fallback: string) =>
+  axios.isAxiosError<{ message?: string }>(error)
+    ? error.response?.data?.message || fallback
+    : fallback
+
 export default function History() {
   const [activeTab, setActiveTab] = useState<Tab>('quotations')
-  const [records, setRecords] = useState<RecordItem[]>([])
-  const [loading, setLoading] = useState(false)
+  const [records, setRecords] = useState<HistoryRecord[]>([])
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
-  const [selected, setSelected] = useState<RecordItem | null>(null)
+  const [selected, setSelected] = useState<HistoryRecord | null>(null)
   const [file, setFile] = useState<File | null>(null)
   const [importing, setImporting] = useState(false)
-  const [importResult, setImportResult] = useState<RecordItem | null>(null)
+  const [importResult, setImportResult] = useState<ImportResult | null>(null)
+
+  const fetchHistory = useCallback(async () => {
+    const endpoint = {
+        quotations: '/history/quotations',
+        costings: '/history/costings',
+        imported: '/history/imported',
+      }[activeTab]
+
+    const response = await api.get(endpoint, {
+      params: { page, limit: 10, search: search.trim() || undefined },
+    })
+    const data = response.data as HistoryResponse
+
+    return {
+      records: data.data ?? [],
+      totalPages: data.pagination?.totalPages ?? 1,
+    }
+  }, [activeTab, page, search])
 
   const loadHistory = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const endpoint = {
-        quotations: '/history/quotations',
-        costings: '/history/costings',
-        imported: '/history/imported',
-      }[activeTab]
-      const response = await api.get(endpoint, {
-        params: { page, limit: 10, search: search.trim() || undefined },
-      })
-      setRecords(response.data.data || [])
-      setTotalPages(response.data.pagination?.totalPages || 1)
+      const data = await fetchHistory()
+      setRecords(data.records)
+      setTotalPages(data.totalPages)
     } catch {
       setError('Unable to load history. Please try again.')
       setRecords([])
     } finally {
       setLoading(false)
     }
-  }, [activeTab, page, search])
+  }, [fetchHistory])
 
   useEffect(() => {
-    void loadHistory()
-  }, [loadHistory])
+    let isCurrent = true
+
+    const loadInitialHistory = async () => {
+      try {
+        const data = await fetchHistory()
+        if (!isCurrent) return
+
+        setRecords(data.records)
+        setTotalPages(data.totalPages)
+      } catch {
+        if (isCurrent) {
+          setError('Unable to load history. Please try again.')
+          setRecords([])
+        }
+      } finally {
+        if (isCurrent) setLoading(false)
+      }
+    }
+
+    void loadInitialHistory()
+
+    return () => {
+      isCurrent = false
+    }
+  }, [fetchHistory])
 
   const handleImport = async () => {
     if (!file) return
@@ -62,11 +168,11 @@ export default function History() {
       const response = await api.post('/history/import', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
-      setImportResult(response.data)
+      setImportResult(response.data as ImportResult)
       setFile(null)
       await loadHistory()
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Excel import failed. Check the file and try again.')
+    } catch (error) {
+      setError(getErrorMessage(error, 'Excel import failed. Check the file and try again.'))
     } finally {
       setImporting(false)
     }
@@ -77,6 +183,7 @@ export default function History() {
     setPage(1)
     setSearch('')
     setSelected(null)
+    setLoading(true)
   }
 
 
@@ -110,7 +217,10 @@ export default function History() {
           <input
             value={search}
             placeholder="Search by quote, RFQ, customer, or part..."
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+              setSearch(event.target.value)
+              setLoading(true)
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 setPage(1)
@@ -233,7 +343,7 @@ export default function History() {
               <div><label>Grand total</label><strong>{money(selected.grandTotal)}</strong></div>
               <div><label>Created</label><strong>{date(selected.createdAt)}</strong></div>
               <h3>Quoted parts</h3>
-              {(selected.parts || []).map((part: RecordItem) => (
+              {(selected.parts || []).map((part) => (
                 <div className="history-detail-part" key={part.id}>
                   <strong>{part.part?.name || part.partName || 'Part'}</strong>
                   <span>Quantity: {part.quantity ?? '—'}</span>
@@ -253,7 +363,7 @@ export default function History() {
               <div><label>Version</label><strong>v{selected.version}</strong></div>
               <div><label>Created</label><strong>{date(selected.createdAt)}</strong></div>
               <h3>Volume pricing</h3>
-              {(selected.volumes || []).map((volume: RecordItem) => (
+              {(selected.volumes || []).map((volume) => (
                 <div className="history-detail-part" key={volume.id}>
                   <strong>Annual volume: {Number(volume.annualVolume || 0).toLocaleString('en-IN')}</strong>
                   <span>Unit price: {money(volume.unitPrice)}</span>
@@ -261,7 +371,7 @@ export default function History() {
                 </div>
               ))}
               <h3>Cost components</h3>
-              {(selected.components || []).map((component: RecordItem) => (
+              {(selected.components || []).map((component) => (
                 <div className="history-detail-part" key={component.id}>
                   <strong>{String(component.type || 'Cost').replaceAll('_', ' ')}</strong>
                   <span>Amount: {money(component.amount)}</span>
@@ -283,7 +393,7 @@ export default function History() {
               <div><label>Grand total</label><strong>{money(selected.grandTotal)}</strong></div>
               <div><label>Source file</label><strong>{selected.sourceFile || '—'}</strong></div>
               <h3>Imported parts</h3>
-              {(selected.parts || []).map((part: RecordItem) => (
+              {(selected.parts || []).map((part) => (
                 <div className="history-detail-part" key={part.id}>
                   <strong>{part.partName}</strong>
                   <span>Part number: {part.partNumber || '—'}</span>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
+import axios from 'axios'
 import {
   AlertCircle,
   Check,
@@ -13,7 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import api from '../../services/api'
-import { useAuth } from '../../context/AuthContext'
+import { useAuth } from '../../context/auth-context'
 import './RateMasters.css'
 
 type MaterialRate = {
@@ -85,6 +86,23 @@ const formatRate = (value: number | string) =>
     maximumFractionDigits: 2,
   })
 
+const getErrorMessage = (error: unknown, fallback: string) =>
+  axios.isAxiosError<{ message?: string }>(error)
+    ? error.response?.data?.message || fallback
+    : fallback
+
+const fetchRateMasters = async () => {
+  const [materialsResponse, machinesResponse] = await Promise.all([
+    api.get('/material-rates'),
+    api.get('/machine-rates'),
+  ])
+
+  return {
+    materialRates: materialsResponse.data.data ?? [],
+    machineRates: machinesResponse.data.data ?? [],
+  }
+}
+
 export default function RateMasters() {
   const { user } = useAuth()
   const canManage = user?.role === 'ADMIN' || user?.role === 'PLANT_HEAD'
@@ -107,26 +125,41 @@ export default function RateMasters() {
     setError('')
 
     try {
-      const [materialsResponse, machinesResponse] = await Promise.all([
-        api.get('/material-rates'),
-        api.get('/machine-rates'),
-      ])
-
-      setMaterialRates(materialsResponse.data.data || [])
-      setMachineRates(machinesResponse.data.data || [])
-    } catch (err: any) {
-      setError(
-        err.response?.data?.message ||
-          'Unable to load rate masters. Please try again.',
-      )
+      const data = await fetchRateMasters()
+      setMaterialRates(data.materialRates)
+      setMachineRates(data.machineRates)
+    } catch (error) {
+      setError(getErrorMessage(error, 'Unable to load rate masters. Please try again.'))
     } finally {
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void loadRates()
-  }, [loadRates])
+    let isCurrent = true
+
+    const loadInitialRates = async () => {
+      try {
+        const data = await fetchRateMasters()
+        if (!isCurrent) return
+
+        setMaterialRates(data.materialRates)
+        setMachineRates(data.machineRates)
+      } catch (error) {
+        if (isCurrent) {
+          setError(getErrorMessage(error, 'Unable to load rate masters. Please try again.'))
+        }
+      } finally {
+        if (isCurrent) setLoading(false)
+      }
+    }
+
+    void loadInitialRates()
+
+    return () => {
+      isCurrent = false
+    }
+  }, [])
 
   const currentRates = tab === 'materials' ? materialRates : machineRates
 
@@ -219,11 +252,8 @@ export default function RateMasters() {
         `${tab === 'materials' ? 'Material' : 'Machine'} rate version created successfully.`,
       )
       await loadRates(false)
-    } catch (err: any) {
-      setError(
-        err.response?.data?.message ||
-          'Unable to create rate. Check the entered details and try again.',
-      )
+    } catch (error) {
+      setError(getErrorMessage(error, 'Unable to create rate. Check the entered details and try again.'))
     } finally {
       setSaving(false)
     }
@@ -248,11 +278,8 @@ export default function RateMasters() {
 
       setSuccess('Rate deactivated. Historical records have been preserved.')
       await loadRates(false)
-    } catch (err: any) {
-      setError(
-        err.response?.data?.message ||
-          'Unable to deactivate this rate.',
-      )
+    } catch (error) {
+      setError(getErrorMessage(error, 'Unable to deactivate this rate.'))
     } finally {
       setDeactivatingId(null)
     }

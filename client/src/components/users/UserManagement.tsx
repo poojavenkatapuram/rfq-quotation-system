@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import axios from 'axios'
 import {
   Users,
   UserPlus,
@@ -40,8 +41,10 @@ const roles: UserRole[] = ['ADMIN', 'SALES_HEAD', 'ESTIMATOR', 'PLANT_HEAD']
 const roleLabel = (role: string) =>
   role.replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase())
 
-const errorMessage = (error: any, fallback: string) =>
-  error.response?.data?.message || fallback
+const errorMessage = (error: unknown, fallback: string) =>
+  axios.isAxiosError<{ message?: string }>(error)
+    ? error.response?.data?.message || fallback
+    : fallback
 
 export default function UserManagement() {
   const [users, setUsers] = useState<User[]>([])
@@ -88,8 +91,8 @@ export default function UserManagement() {
 
       setUsers(records)
       setPagination(data.pagination)
-    } catch (err: any) {
-      setError(errorMessage(err, 'Unable to load users. Please check your connection.'))
+    } catch (error) {
+      setError(errorMessage(error, 'Unable to load users. Please check your connection.'))
     } finally {
       setLoading(false)
     }
@@ -177,8 +180,8 @@ export default function UserManagement() {
 
       resetForm()
       await loadUsers(pagination.page)
-    } catch (err: any) {
-      setError(errorMessage(err, 'Unable to save user details.'))
+    } catch (error) {
+      setError(errorMessage(error, 'Unable to save user details.'))
     } finally {
       setSaving(false)
     }
@@ -202,8 +205,8 @@ export default function UserManagement() {
       })
       setNotice(`${user.name} has been ${nextStatus ? 'activated' : 'deactivated'}.`)
       await loadUsers(pagination.page)
-    } catch (err: any) {
-      setError(errorMessage(err, `Unable to ${action} this user.`))
+    } catch (error) {
+      setError(errorMessage(error, `Unable to ${action} this user.`))
     } finally {
       setActionUserId('')
     }

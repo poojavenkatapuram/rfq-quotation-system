@@ -11,6 +11,7 @@ import {
   LogOut,
   Menu,
   X,
+  Building2,
   Factory,
   Package,
   Users,
@@ -24,13 +25,19 @@ import Quotation from './components/quotations/Quotation'
 import Dashboard from './components/dashboard/Dashboard'
 import HistoryPage from './components/history/History'
 import Login from './components/auth/Login'
-import { AuthProvider, useAuth } from './context/AuthContext'
+import { AuthProvider } from './context/AuthContext'
+import { useAuth } from './context/auth-context'
 import UserManagement from './components/users/UserManagement'
 import RateMasters from './components/rates/RateMasters'
+import RFQIntake from './components/intake/RFQIntake'
+import CustomerManagement from './components/customers/CustomerManagement'
+import CompanySettings from './components/settings/Settings'
 
 const navigation: { label: string; icon: LucideIcon }[] = [
   { label: 'Dashboard', icon: LayoutDashboard },
   { label: 'RFQ Register', icon: ClipboardList },
+  { label: 'RFQ Intake', icon: FileText },
+  { label: 'Customers', icon: Building2 },
   { label: 'Costing', icon: Calculator },
   { label: 'Quotations', icon: FileText },
   { label: 'Rate Masters', icon: IndianRupee },
@@ -57,8 +64,10 @@ function AppContent() {
   const { user, isLoading, logout } = useAuth()
   const [activePage, setActivePage] = useState('Dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [intakeVisited, setIntakeVisited] = useState(false)
 
   const navigate = (page: string) => {
+    if (page === 'RFQ Intake') setIntakeVisited(true)
     setActivePage(page)
     setSidebarOpen(false)
   }
@@ -134,6 +143,7 @@ function AppContent() {
             </button>
           )}
 
+          {user.role === 'ADMIN' && (
           <button
             className={`nav-item ${activePage === 'Settings' ? 'nav-active' : ''}`}
             onClick={() => navigate('Settings')}
@@ -141,6 +151,7 @@ function AppContent() {
             <Settings size={19} />
             <span>Settings</span>
           </button>
+          )}
         </nav>
 
         <div className="sidebar-bottom">
@@ -208,10 +219,17 @@ function AppContent() {
         </header>
 
         <div className="page-content">
+          {intakeVisited && <div hidden={activePage !== 'RFQ Intake'}>
+            <RFQIntake key={user.id} />
+          </div>}
           {activePage === 'Dashboard' ? (
             <Dashboard onNavigate={navigate} />
           ) : activePage === 'RFQ Register' ? (
             <RFQRegister />
+          ) : activePage === 'RFQ Intake' ? (
+            null
+          ) : activePage === 'Customers' ? (
+            <CustomerManagement />
           ) : activePage === 'Costing' ? (
             <Costing />
           ) : activePage === 'Quotations' ? (
@@ -220,6 +238,8 @@ function AppContent() {
             <HistoryPage />
           ) : activePage === 'Rate Masters' ? (
             <RateMasters />
+          ) : activePage === 'Settings' && user.role === 'ADMIN' ? (
+            <CompanySettings />
           ) : activePage === 'Users & Roles' && user?.role === 'ADMIN' ? (
             <UserManagement />
           ) : (
