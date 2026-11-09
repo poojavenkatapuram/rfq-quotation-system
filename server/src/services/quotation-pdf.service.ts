@@ -1,49 +1,31 @@
 import PDFDocument from "pdfkit";
+import type { ApprovedQuotationSnapshot } from "./quotation-snapshot.service.js";
 
-type QuotationPdfData = {
-  quotationNumber: string;
-  status: string;
-  createdAt: Date;
-  validUntil: Date | null;
-  gstPercentage: unknown;
-  subtotal: unknown;
-  gstAmount: unknown;
-  grandTotal: unknown;
-  notes: string | null;
-  customer: {
-    name: string;
-    address: string | null;
-    email: string | null;
-    phone: string | null;
-    gstNumber: string | null;
-  };
-  rfq: {
-    rfqNumber: string;
-  };
-  parts: Array<{
-    quantity: number;
-    unitPrice: unknown;
-    totalPrice: unknown;
-    part: {
-      partNumber: string | null;
-      name: string;
-      description: string | null;
-      materialGrade: string | null;
-    };
-  }>;
-};
-
-const amount = (value: unknown) =>
-  `INR ${Number(value || 0).toLocaleString("en-IN", {
+const amount = (value: number) =>
+  "INR " + value.toLocaleString("en-IN", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  })}`;
+  });
 
-const date = (value: Date | null) =>
+const date = (value: string | null) =>
   value ? new Date(value).toLocaleDateString("en-IN") : "Not specified";
 
+const line = (
+  doc: PDFKit.PDFDocument,
+  label: string,
+  value: string,
+  x: number,
+  y: number,
+  width: number,
+) => {
+  doc.font("Helvetica-Bold").fontSize(8).fillColor("#333333")
+    .text(label, x, y, { width: 95 });
+  doc.font("Helvetica").fontSize(8).fillColor("#333333")
+    .text(value, x + 98, y, { width: width - 98 });
+};
+
 export const generateQuotationPdf = (
-  quotation: QuotationPdfData
+  quotation: ApprovedQuotationSnapshot,
 ): Promise<Buffer> =>
   new Promise((resolve, reject) => {
     const doc = new PDFDocument({
@@ -51,206 +33,207 @@ export const generateQuotationPdf = (
       margins: { top: 48, bottom: 48, left: 48, right: 48 },
       bufferPages: true,
       info: {
-        Title: `Quotation ${quotation.quotationNumber}`,
-        Author: "Company A",
-        Subject: "Customer quotation",
+        Title: "Quotation " + quotation.quotationNumber,
+        Subject: "Approved customer quotation",
       },
     });
 
     const chunks: Buffer[] = [];
-
     doc.on("data", (chunk: Buffer) => chunks.push(chunk));
     doc.on("error", reject);
     doc.on("end", () => resolve(Buffer.concat(chunks)));
 
     const left = 48;
     const right = 547;
-    const contentWidth = right - left;
+    const width = right - left;
+    let y = 48;
 
-    doc.font("Helvetica-Bold").fontSize(20).text("COMPANY A", left, 48);
-    doc.font("Helvetica").fontSize(9).fillColor("#555555")
-      .text("AUTO-COMPONENT MANUFACTURER", left, 74);
+    const pageHeader = () => {
+      const companyName = quotation.company.name ||
+        "COMPANY DETAILS PENDING CONFIGURATION";
 
-    doc.fillColor("#111111").font("Helvetica-Bold").fontSize(19)
-      .text("QUOTATION", 350, 48, { width: 197, align: "right" });
+      doc.font("Helvetica-Bold").fontSize(17).fillColor("#111111")
+        .text(companyName, left, 48, { width: 285 });
+      doc.font("Helvetica").fontSize(8).fillColor("#555555")
+        .text("CUSTOMER QUOTATION", left, 71);
 
-    doc.font("Helvetica").fontSize(9).fillColor("#444444")
-      .text(quotation.quotationNumber, 350, 76, {
-        width: 197,
-        align: "right",
-      })
-      .text(`Date: ${date(quotation.createdAt)}`, 350, 90, {
-        width: 197,
-        align: "right",
-      });
+      doc.font("Helvetica-Bold").fontSize(17).fillColor("#111111")
+        .text("QUOTATION", 340, 48, { width: 207, align: "right" });
+      doc.font("Helvetica").fontSize(8).fillColor("#444444")
+        .text(quotation.quotationNumber, 340, 71, {
+          width: 207,
+          align: "right",
+        })
+        .text("Quotation date: " + date(quotation.quotationDate), 340, 83, {
+          width: 207,
+          align: "right",
+        });
 
-    doc.moveTo(left, 112).lineTo(right, 112).lineWidth(1)
-      .strokeColor("#333333").stroke();
+      doc.moveTo(left, 102).lineTo(right, 102)
+        .strokeColor("#333333").lineWidth(1).stroke();
+      y = 120;
+    };
 
-    let y = 130;
+    const ensureSpace = (needed: number) => {
+      if (y + needed <= 745) return;
+      doc.addPage();
+      pageHeader();
+    };
 
-    doc.font("Helvetica-Bold").fontSize(10).fillColor("#111111")
-      .text("CUSTOMER", left, y);
+    const section = (title: string, requiredContentHeight = 0) => {
+      ensureSpace(28 + requiredContentHeight);
+      doc.font("Helvetica-Bold").fontSize(10).fillColor("#111111")
+        .text(title, left, y);
+      y += 15;
+      doc.moveTo(left, y).lineTo(right, y)
+        .strokeColor("#cccccc").lineWidth(0.75).stroke();
+      y += 9;
+    };
 
-    doc.font("Helvetica").fontSize(9).fillColor("#333333")
-      .text(quotation.customer.name, left, y + 17, { width: 230 });
+    const details = (
+      entries: Array<[string, string]>,
+      columnX = left,
+      columnWidth = width,
+    ) => {
+      for (const [label, value] of entries) {
+        doc.font("Helvetica-Bold").fontSize(8);
+        const labelHeight = doc.heightOfString(label, { width: 95 });
+        doc.font("Helvetica").fontSize(8);
+        const valueHeight = doc.heightOfString(value, {
+          width: columnWidth - 98,
+        });
+        const rowHeight = Math.max(
+          13,
+          Math.ceil(Math.max(labelHeight, valueHeight) + 3),
+        );
+        ensureSpace(rowHeight);
+        line(doc, label, value, columnX, y, columnWidth);
+        y += rowHeight;
+      }
+    };
 
-    let customerY = y + 32;
+    pageHeader();
 
-    for (const detail of [
+    section("COMPANY AND CUSTOMER");
+    const companyDetails = [
+      quotation.company.address,
+      quotation.company.email,
+      quotation.company.phone,
+      quotation.company.gstNumber
+        ? "GSTIN: " + quotation.company.gstNumber
+        : null,
+    ].filter((item): item is string => Boolean(item));
+
+    const customerDetails = [
       quotation.customer.address,
       quotation.customer.email,
       quotation.customer.phone,
       quotation.customer.gstNumber
-        ? `GSTIN: ${quotation.customer.gstNumber}`
+        ? "GSTIN: " + quotation.customer.gstNumber
         : null,
-    ]) {
-      if (detail) {
-        doc.text(detail, left, customerY, { width: 230 });
-        customerY += 13;
-      }
+    ].filter((item): item is string => Boolean(item));
+
+    line(
+      doc,
+      "Company",
+      quotation.company.name || "Company details pending configuration",
+      left,
+      y,
+      width,
+    );
+    y += 13;
+    for (const value of companyDetails) {
+      ensureSpace(14);
+      doc.font("Helvetica").fontSize(8).fillColor("#333333")
+        .text(value, left + 98, y, { width: width - 98 });
+      y += 13;
+    }
+    line(doc, "Customer", quotation.customer.name, left, y, width);
+    y += 13;
+    for (const value of customerDetails) {
+      ensureSpace(14);
+      doc.font("Helvetica").fontSize(8).fillColor("#333333")
+        .text(value, left + 98, y, { width: width - 98 });
+      y += 13;
     }
 
-    doc.font("Helvetica-Bold").fontSize(10).fillColor("#111111")
-      .text("QUOTATION DETAILS", 320, y);
+    section("QUOTATION DETAILS");
+    details([
+      ["RFQ number", quotation.rfqNumber],
+      ["Quotation number", quotation.quotationNumber],
+      ["Quotation date", date(quotation.quotationDate)],
+      ["Validity", date(quotation.validUntil)],
+    ]);
 
-    doc.font("Helvetica").fontSize(9).fillColor("#333333")
-      .text(`RFQ: ${quotation.rfq.rfqNumber}`, 320, y + 17)
-      .text(`Valid until: ${date(quotation.validUntil)}`, 320, y + 32)
-      .text(`Status: ${quotation.status}`, 320, y + 47);
-
-    y = Math.max(customerY, y + 75) + 18;
-
-    doc.moveTo(left, y).lineTo(right, y)
-      .strokeColor("#cccccc").stroke();
-
-    y += 16;
-
-    const columns = [
-      { label: "Part / Description", x: left, width: 190 },
-      { label: "Material", x: 240, width: 75 },
-      { label: "Quantity", x: 315, width: 65 },
-      { label: "Unit price", x: 380, width: 82 },
-      { label: "Total", x: 462, width: 85 },
-    ];
-
-    const drawTableHeader = () => {
-      doc.rect(left, y, contentWidth, 25).fill("#eeeeee");
-      doc.fillColor("#111111").font("Helvetica-Bold").fontSize(8);
-
-      columns.forEach((column) => {
-        doc.text(column.label, column.x + 4, y + 8, {
-          width: column.width - 8,
-          align: column.label === "Part / Description" ? "left" : "right",
-        });
-      });
-
-      y += 32;
-    };
-
-    drawTableHeader();
-
-    for (const [index, line] of quotation.parts.entries()) {
-      const partName = line.part.partNumber || line.part.name;
-      const description =
-        line.part.description && line.part.description !== partName
-          ? line.part.description
-          : "";
-      const partLabel = description
-        ? `${partName}\n${description}`
-        : partName;
-
-      const rowHeight = Math.max(
-        34,
-        doc.fontSize(8).heightOfString(partLabel, { width: 182 }) + 12
+    for (const [index, part] of quotation.parts.entries()) {
+      ensureSpace(235);
+      section(
+        "PART " + (index + 1) + ": " + (part.partNumber || part.partName),
       );
+      details([
+        ["Part name", part.partName],
+        ["Part number", part.partNumber || "Not specified"],
+        ["Material", part.materialGrade || "Not specified"],
+        ["Revision", part.revision || "Not specified"],
+        ["Annual volume", part.annualVolume.toLocaleString("en-IN")],
+      ]);
 
-      if (y + rowHeight > 735) {
-        doc.addPage();
-        y = 48;
-        drawTableHeader();
-      }
+      ensureSpace(70);
+      doc.rect(left, y, width, 20).fill("#eeeeee");
+      doc.font("Helvetica-Bold").fontSize(8).fillColor("#111111")
+        .text("COMMERCIAL PRICING", left + 5, y + 6, {
+          width: width - 150,
+        })
+        .text("AMOUNT", right - 115, y + 6, {
+          width: 110,
+          align: "right",
+        });
+      y += 25;
 
-      doc.font("Helvetica").fontSize(8).fillColor("#333333");
-      doc.text(partLabel, left + 4, y, { width: 182 });
-      doc.text(line.part.materialGrade || "—", 244, y, {
-        width: 67,
-        align: "right",
-      });
-      doc.text(line.quantity.toLocaleString("en-IN"), 319, y, {
-        width: 57,
-        align: "right",
-      });
-      doc.text(amount(line.unitPrice), 384, y, {
-        width: 74,
-        align: "right",
-      });
-      doc.text(amount(line.totalPrice), 466, y, {
-        width: 77,
-        align: "right",
-      });
-
-      y += rowHeight;
-      doc.moveTo(left, y).lineTo(right, y)
-        .strokeColor("#dddddd").stroke();
-      y += 9;
+      doc.font("Helvetica-Bold").fontSize(8).fillColor("#111111")
+        .text("Unit selling price", left + 5, y, { width: width - 150 })
+        .text(amount(part.unitSellingPrice), right - 115, y, {
+          width: 110,
+          align: "right",
+        });
+      y += 14;
+      doc.text("Annual line value", left + 5, y, { width: width - 150 })
+        .text(amount(part.lineTotal), right - 115, y, {
+          width: 110,
+          align: "right",
+        });
+      y += 19;
     }
 
-    if (y > 625) {
-      doc.addPage();
-      y = 60;
-    }
+    section("QUOTATION TOTALS");
+    details([
+      ["Subtotal", amount(quotation.totals.subtotal)],
+      ["GST rate", quotation.totals.gstPercentage.toFixed(2) + "%"],
+      ["GST amount", amount(quotation.totals.gstAmount)],
+      ["Final amount incl. GST", amount(quotation.totals.grandTotal)],
+    ]);
 
-    y += 12;
+    section("COMMERCIAL CONDITIONS", 75);
+    details([
+      ["Payment terms", quotation.terms.paymentTerms || "Not specified"],
+      ["Delivery terms", quotation.terms.deliveryTerms || "Not specified"],
+      [
+        "Other commercial conditions",
+        quotation.terms.commercialTerms || "Not specified",
+      ],
+    ]);
 
-    const totalsX = 330;
-    const totalsWidth = 217;
-
-    doc.font("Helvetica").fontSize(10).fillColor("#333333")
-      .text("Subtotal", totalsX, y, { width: 100 })
-      .text(amount(quotation.subtotal), totalsX + 100, y, {
-        width: 117,
-        align: "right",
-      });
-
-    y += 21;
-
-    doc.text(`GST (${Number(quotation.gstPercentage)}%)`, totalsX, y, {
-      width: 100,
-    }).text(amount(quotation.gstAmount), totalsX + 100, y, {
-      width: 117,
-      align: "right",
-    });
-
-    y += 24;
-
-    doc.moveTo(totalsX, y).lineTo(right, y)
-      .strokeColor("#333333").lineWidth(1).stroke();
-
-    y += 12;
-
-    doc.font("Helvetica-Bold").fontSize(12).fillColor("#111111")
-      .text("GRAND TOTAL", totalsX, y, { width: 100 })
-      .text(amount(quotation.grandTotal), totalsX + 100, y, {
-        width: 117,
-        align: "right",
-      });
-
-    y += 42;
-
-    if (quotation.notes) {
-      if (y > 700) {
-        doc.addPage();
-        y = 55;
-      }
-
-      doc.font("Helvetica-Bold").fontSize(9).fillColor("#111111")
-        .text("NOTES", left, y);
-
-      y += 15;
-
-      doc.font("Helvetica").fontSize(9).fillColor("#444444")
-        .text(quotation.notes, left, y, { width: contentWidth });
+    const range = doc.bufferedPageRange();
+    for (let page = 0; page < range.count; page += 1) {
+      doc.switchToPage(page);
+      doc.font("Helvetica").fontSize(7).fillColor("#666666")
+        .text(
+          "Quotation " + quotation.quotationNumber +
+            " | Page " + (page + 1) + " of " + range.count,
+          left,
+          785,
+          { width, align: "center" },
+        );
     }
 
     doc.end();

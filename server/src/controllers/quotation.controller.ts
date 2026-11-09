@@ -1,9 +1,17 @@
+import { gstPercentageSchema } from "../services/gst-validation.service.js";
+import { lockRFQ, getLockedRFQ, assertRFQOpen, syncRFQLifecycle, RFQLifecycleError } from "../services/rfq-lifecycle.service.js";
+import { getCompanySettings } from "../services/company-settings.service.js";
+import { requireApprovedRoutings, TechnicalReviewConflict } from "../services/routing-review.service.js";
 import { Request, Response } from "express";
 import { Prisma, QuotationStatus, ApprovalStatus } from "@prisma/client";
 import { z } from "zod";
 
 import prisma from "../lib/prisma.js";
 import { generateQuotationPdf } from "../services/quotation-pdf.service.js";
+import {
+  buildApprovedQuotationSnapshot,
+  isApprovedQuotationSnapshot,
+} from "../services/quotation-snapshot.service.js";
 import type { AuthenticatedRequest } from "../middleware/auth.middleware.js";
 
 const APPROVAL_THRESHOLD = 2500000;
@@ -11,8 +19,11 @@ const APPROVAL_THRESHOLD = 2500000;
 const createQuotationSchema = z.object({
   rfqId: z.string().min(1),
   validUntil: z.coerce.date().optional(),
-  gstPercentage: z.number().min(0).max(100).default(18),
+  gstPercentage: gstPercentageSchema.default(18),
   notes: z.string().trim().max(2000).optional(),
+  paymentTerms: z.string().trim().max(1000).optional(),
+  deliveryTerms: z.string().trim().max(1000).optional(),
+  commercialTerms: z.string().trim().max(2000).optional(),
   parts: z.array(
     z.object({
       partId: z.string().min(1),
@@ -38,6 +49,13 @@ const listQuotationQuerySchema = z.object({
 const isUniqueConstraintError = (error: unknown): boolean =>
   error instanceof Prisma.PrismaClientKnownRequestError &&
   error.code === "P2002";
+
+const isApprovedSnapshotValidationError = (error: unknown): boolean =>
+  error instanceof Error && (
+    error.message === "APPROVED_SNAPSHOT_INVALID" ||
+    error.message.startsWith("Invalid snapshot field:") ||
+    error.message.startsWith("Approved snapshots require saved")
+  );
 
 const quotationInclude = {
   rfq: { select: { rfqNumber: true } },
@@ -119,6 +137,7 @@ export const createQuotation = async (
     }
 
     const quotation = await prisma.$transaction(async (tx) => {
+      await lockRFQ(tx, data.rfqId);
       const rfq = await tx.rFQ.findUnique({
         where: { id: data.rfqId },
         include: {
@@ -129,9 +148,7 @@ export const createQuotation = async (
 
       if (!rfq) throw new Error("RFQ_NOT_FOUND");
 
-      if (["WON", "LOST"].includes(rfq.status)) {
-        throw new Error("RFQ_CLOSED");
-      }
+      assertRFQOpen(rfq);
 
       const requestedPartIds = data.parts.map((item) => item.partId);
 
@@ -225,6 +242,9 @@ export const createQuotation = async (
           gstAmount,
           grandTotal,
           notes: data.notes,
+          paymentTerms: data.paymentTerms,
+          deliveryTerms: data.deliveryTerms,
+          commercialTerms: data.commercialTerms,
           parts: {
             create: quotationParts,
           },
@@ -232,6 +252,7 @@ export const createQuotation = async (
         include: quotationInclude,
       });
 
+      await syncRFQLifecycle(tx, rfq, req.user!.userId);
       await tx.auditLog.create({
         data: {
           actorId: req.user!.userId,
@@ -263,6 +284,7 @@ export const createQuotation = async (
       data: quotation,
     });
   } catch (error) {
+    if (error instanceof RFQLifecycleError) return res.status(error.status).json({ success: false, message: error.message });
     const knownErrors: Record<string, { status: number; message: string }> = {
       RFQ_NOT_FOUND: { status: 404, message: "RFQ not found" },
       RFQ_CLOSED: { status: 400, message: "Cannot quote against a closed RFQ" },
@@ -477,14 +499,18 @@ export const submitQuotation = async (
     const result = await prisma.$transaction(async (tx) => {
       const quotation = await tx.quotation.findUnique({
         where: { id: quotationId },
-        include: { parts: true },
+        include: quotationInclude,
       });
 
       if (!quotation) throw new Error("QUOTATION_NOT_FOUND");
 
       if (quotation.status !== QuotationStatus.DRAFT) {
-        throw new Error("INVALID_QUOTATION_STATUS");
+        throw new Error("QUOTATION_TRANSITION_CONFLICT");
       }
+
+      const technicalReviews = await requireApprovedRoutings(tx, quotation.parts);
+      const parentRFQ = await getLockedRFQ(tx, quotation.rfqId);
+      assertRFQOpen(parentRFQ);
 
       const annualQuotationValue = roundMoney(
         quotation.parts.reduce(
@@ -521,11 +547,35 @@ export const submitQuotation = async (
         nextStatus = QuotationStatus.PENDING_APPROVAL;
       }
 
-      const updatedQuotation = await tx.quotation.update({
+      const approvedAt = nextStatus === QuotationStatus.APPROVED
+        ? new Date()
+        : null;
+      const companySettings = approvedAt ? await getCompanySettings(tx) : null;
+      const approvedSnapshot = approvedAt
+        ? buildApprovedQuotationSnapshot(quotation, {
+            mode: "AUTOMATIC_THRESHOLD",
+            approvedAt,
+          }, companySettings!.company)
+        : undefined;
+
+      const transition = await tx.quotation.updateMany({
+        where: { id: quotationId, status: QuotationStatus.DRAFT },
+        data: {
+          status: nextStatus,
+          ...(approvedAt && {
+            approvedAt,
+            approvedSnapshot,
+          }),
+        },
+      });
+      if (transition.count !== 1) throw new Error("QUOTATION_TRANSITION_CONFLICT");
+
+      await syncRFQLifecycle(tx, parentRFQ, req.user!.userId);
+      const updatedQuotation = await tx.quotation.findUnique({
         where: { id: quotationId },
-        data: { status: nextStatus },
         include: quotationInclude,
       });
+      if (!updatedQuotation) throw new Error("QUOTATION_NOT_FOUND");
 
       await tx.auditLog.create({
         data: {
@@ -536,6 +586,8 @@ export const submitQuotation = async (
           details: {
             quotationNumber: quotation.quotationNumber,
             annualQuotationValue,
+            technicalReviews,
+            ...(companySettings && { companyProfileVersion: companySettings.version, companyDetailsSource: companySettings.source }),
             requiresApproval,
             status: nextStatus,
           },
@@ -557,14 +609,23 @@ export const submitQuotation = async (
       data: result,
     });
   } catch (error) {
+    if (error instanceof RFQLifecycleError) return res.status(error.status).json({ success: false, message: error.message });
+    if (error instanceof TechnicalReviewConflict) return res.status(409).json({ success: false, message: error.message });
+    if (isApprovedSnapshotValidationError(error)) {
+      return res.status(409).json({
+        success: false,
+        message: "Saved quotation data is incomplete or inconsistent; correct it before approval",
+      });
+    }
+
     const knownErrors: Record<string, { status: number; message: string }> = {
       QUOTATION_NOT_FOUND: {
         status: 404,
         message: "Quotation not found",
       },
-      INVALID_QUOTATION_STATUS: {
-        status: 400,
-        message: "Only draft quotations can be submitted",
+      QUOTATION_TRANSITION_CONFLICT: {
+        status: 409,
+        message: "The quotation changed while this request was being processed; refresh and try again",
       },
       SALES_HEAD_NOT_FOUND: {
         status: 409,
@@ -625,13 +686,17 @@ export const approveQuotation = async (
     const result = await prisma.$transaction(async (tx) => {
       const quotation = await tx.quotation.findUnique({
         where: { id: quotationId },
+        include: quotationInclude,
       });
 
       if (!quotation) throw new Error("QUOTATION_NOT_FOUND");
 
       if (quotation.status !== QuotationStatus.PENDING_APPROVAL) {
-        throw new Error("QUOTATION_NOT_PENDING");
+        throw new Error("QUOTATION_TRANSITION_CONFLICT");
       }
+
+      const parentRFQ = await getLockedRFQ(tx, quotation.rfqId);
+      assertRFQOpen(parentRFQ);
 
       const approval = await tx.approval.findFirst({
         where: {
@@ -639,23 +704,64 @@ export const approveQuotation = async (
           approverId: req.user!.userId,
           status: ApprovalStatus.PENDING,
         },
-      });
-
-      if (!approval) throw new Error("APPROVAL_NOT_ASSIGNED");
-
-      await tx.approval.update({
-        where: { id: approval.id },
-        data: {
-          status: ApprovalStatus.APPROVED,
-          approvedAt: new Date(),
+        include: {
+          approver: {
+            select: { name: true, role: true },
+          },
         },
       });
 
-      const updatedQuotation = await tx.quotation.update({
+      if (!approval) {
+        const priorAssignment = await tx.approval.findFirst({
+          where: { quotationId, approverId: req.user!.userId },
+        });
+        if (priorAssignment) throw new Error("QUOTATION_TRANSITION_CONFLICT");
+        throw new Error("APPROVAL_NOT_ASSIGNED");
+      }
+
+      const approvedAt = new Date();
+
+      const approvalTransition = await tx.approval.updateMany({
+        where: {
+          id: approval.id,
+          quotationId,
+          approverId: req.user!.userId,
+          status: ApprovalStatus.PENDING,
+        },
+        data: {
+          status: ApprovalStatus.APPROVED,
+          approvedAt,
+        },
+      });
+      if (approvalTransition.count !== 1) {
+        throw new Error("QUOTATION_TRANSITION_CONFLICT");
+      }
+
+      const companySettings = await getCompanySettings(tx);
+      const approvedSnapshot = buildApprovedQuotationSnapshot(quotation, {
+        mode: "SALES_HEAD",
+        approvedAt,
+        approverName: approval.approver.name,
+        approverRole: approval.approver.role,
+      }, companySettings.company);
+
+      const quotationTransition = await tx.quotation.updateMany({
+        where: { id: quotationId, status: QuotationStatus.PENDING_APPROVAL },
+        data: {
+          status: QuotationStatus.APPROVED,
+          approvedAt,
+          approvedSnapshot,
+        },
+      });
+      if (quotationTransition.count !== 1) {
+        throw new Error("QUOTATION_TRANSITION_CONFLICT");
+      }
+      await syncRFQLifecycle(tx, parentRFQ, req.user!.userId);
+      const updatedQuotation = await tx.quotation.findUnique({
         where: { id: quotationId },
-        data: { status: QuotationStatus.APPROVED },
         include: quotationInclude,
       });
+      if (!updatedQuotation) throw new Error("QUOTATION_NOT_FOUND");
 
       await tx.auditLog.create({
         data: {
@@ -665,6 +771,8 @@ export const approveQuotation = async (
           entityId: quotationId,
           details: {
             quotationNumber: quotation.quotationNumber,
+            companyProfileVersion: companySettings.version,
+            companyDetailsSource: companySettings.source,
           },
         },
       });
@@ -678,14 +786,22 @@ export const approveQuotation = async (
       data: result,
     });
   } catch (error) {
+    if (error instanceof RFQLifecycleError) return res.status(error.status).json({ success: false, message: error.message });
+    if (isApprovedSnapshotValidationError(error)) {
+      return res.status(409).json({
+        success: false,
+        message: "Saved quotation data is incomplete or inconsistent; correct it before approval",
+      });
+    }
+
     const knownErrors: Record<string, { status: number; message: string }> = {
       QUOTATION_NOT_FOUND: {
         status: 404,
         message: "Quotation not found",
       },
-      QUOTATION_NOT_PENDING: {
-        status: 400,
-        message: "Quotation is not awaiting approval",
+      QUOTATION_TRANSITION_CONFLICT: {
+        status: 409,
+        message: "The quotation approval was already processed; refresh to see its current status",
       },
       APPROVAL_NOT_ASSIGNED: {
         status: 403,
@@ -761,8 +877,11 @@ export const rejectQuotation = async (
       if (!quotation) throw new Error("QUOTATION_NOT_FOUND");
 
       if (quotation.status !== QuotationStatus.PENDING_APPROVAL) {
-        throw new Error("QUOTATION_NOT_PENDING");
+        throw new Error("QUOTATION_TRANSITION_CONFLICT");
       }
+
+      const parentRFQ = await getLockedRFQ(tx, quotation.rfqId);
+      assertRFQOpen(parentRFQ);
 
       const approval = await tx.approval.findFirst({
         where: {
@@ -772,21 +891,43 @@ export const rejectQuotation = async (
         },
       });
 
-      if (!approval) throw new Error("APPROVAL_NOT_ASSIGNED");
+      if (!approval) {
+        const priorAssignment = await tx.approval.findFirst({
+          where: { quotationId, approverId: req.user!.userId },
+        });
+        if (priorAssignment) throw new Error("QUOTATION_TRANSITION_CONFLICT");
+        throw new Error("APPROVAL_NOT_ASSIGNED");
+      }
 
-      await tx.approval.update({
-        where: { id: approval.id },
+      const approvalTransition = await tx.approval.updateMany({
+        where: {
+          id: approval.id,
+          quotationId,
+          approverId: req.user!.userId,
+          status: ApprovalStatus.PENDING,
+        },
         data: {
           status: ApprovalStatus.REJECTED,
           comments: validation.data.comments,
         },
       });
+      if (approvalTransition.count !== 1) {
+        throw new Error("QUOTATION_TRANSITION_CONFLICT");
+      }
 
-      const updatedQuotation = await tx.quotation.update({
-        where: { id: quotationId },
+      const quotationTransition = await tx.quotation.updateMany({
+        where: { id: quotationId, status: QuotationStatus.PENDING_APPROVAL },
         data: { status: QuotationStatus.REJECTED },
+      });
+      if (quotationTransition.count !== 1) {
+        throw new Error("QUOTATION_TRANSITION_CONFLICT");
+      }
+      await syncRFQLifecycle(tx, parentRFQ, req.user!.userId);
+      const updatedQuotation = await tx.quotation.findUnique({
+        where: { id: quotationId },
         include: quotationInclude,
       });
+      if (!updatedQuotation) throw new Error("QUOTATION_NOT_FOUND");
 
       await tx.auditLog.create({
         data: {
@@ -810,14 +951,15 @@ export const rejectQuotation = async (
       data: result,
     });
   } catch (error) {
+    if (error instanceof RFQLifecycleError) return res.status(error.status).json({ success: false, message: error.message });
     const knownErrors: Record<string, { status: number; message: string }> = {
       QUOTATION_NOT_FOUND: {
         status: 404,
         message: "Quotation not found",
       },
-      QUOTATION_NOT_PENDING: {
-        status: 400,
-        message: "Quotation is not awaiting approval",
+      QUOTATION_TRANSITION_CONFLICT: {
+        status: 409,
+        message: "The quotation approval was already processed; refresh to see its current status",
       },
       APPROVAL_NOT_ASSIGNED: {
         status: 403,
@@ -859,10 +1001,10 @@ export const sendQuotation = async (
       });
     }
 
-    if (!["ESTIMATOR", "ADMIN"].includes(req.user.role)) {
+    if (req.user.role !== "SALES_HEAD") {
       return res.status(403).json({
         success: false,
-        message: "Only estimators or administrators can send quotations",
+        message: "Only Sales Heads can send quotations",
       });
     }
 
@@ -878,33 +1020,29 @@ export const sendQuotation = async (
     const result = await prisma.$transaction(async (tx) => {
       const quotation = await tx.quotation.findUnique({
         where: { id: quotationId },
-        include: { rfq: true },
+        include: { ...quotationInclude, rfq: true },
       });
 
       if (!quotation) throw new Error("QUOTATION_NOT_FOUND");
 
       if (quotation.status !== QuotationStatus.APPROVED) {
-        throw new Error("QUOTATION_NOT_APPROVED");
+        throw new Error("QUOTATION_TRANSITION_CONFLICT");
       }
 
-      if (
-        !["ESTIMATING", "PENDING_APPROVAL"].includes(
-          quotation.rfq.status
-        )
-      ) {
-        throw new Error("INVALID_RFQ_STATUS");
+      if (!isApprovedQuotationSnapshot(quotation.approvedSnapshot)) {
+        throw new Error("APPROVED_SNAPSHOT_MISSING");
       }
+      const technicalReviews = await requireApprovedRoutings(tx, quotation.parts);
+      const parentRFQ = await getLockedRFQ(tx, quotation.rfqId);
+      assertRFQOpen(parentRFQ);
 
-      const updatedQuotation = await tx.quotation.update({
-        where: { id: quotationId },
+      const transition = await tx.quotation.updateMany({
+        where: { id: quotationId, status: QuotationStatus.APPROVED },
         data: { status: QuotationStatus.SENT },
-        include: quotationInclude,
       });
+      if (transition.count !== 1) throw new Error("QUOTATION_TRANSITION_CONFLICT");
 
-      await tx.rFQ.update({
-        where: { id: quotation.rfqId },
-        data: { status: "QUOTATION_SENT" },
-      });
+      await syncRFQLifecycle(tx, parentRFQ, req.user!.userId);
 
       await tx.auditLog.createMany({
         data: [
@@ -915,6 +1053,9 @@ export const sendQuotation = async (
             entityId: quotationId,
             details: {
               quotationNumber: quotation.quotationNumber,
+              deliveryMethod: "INTERNAL_STATUS_ONLY",
+              externalMessageSent: false,
+              technicalReviews,
             },
           },
           {
@@ -929,27 +1070,39 @@ export const sendQuotation = async (
         ],
       });
 
+      const updatedQuotation = await tx.quotation.findUnique({
+        where: { id: quotationId },
+        include: quotationInclude,
+      });
+      if (!updatedQuotation) throw new Error("QUOTATION_NOT_FOUND");
       return updatedQuotation;
     });
 
     return res.status(200).json({
       success: true,
-      message: "Quotation marked as sent successfully",
+      message: "Quotation marked as sent internally; no external message was sent",
       data: result,
     });
   } catch (error) {
+    if (error instanceof RFQLifecycleError) return res.status(error.status).json({ success: false, message: error.message });
+    if (error instanceof TechnicalReviewConflict) return res.status(409).json({ success: false, message: error.message });
     const knownErrors: Record<string, { status: number; message: string }> = {
       QUOTATION_NOT_FOUND: {
         status: 404,
         message: "Quotation not found",
       },
-      QUOTATION_NOT_APPROVED: {
-        status: 400,
-        message: "Only approved quotations can be sent",
+      QUOTATION_TRANSITION_CONFLICT: {
+        status: 409,
+        message: "The quotation changed while this request was being processed; refresh and try again",
       },
       INVALID_RFQ_STATUS: {
         status: 400,
         message: "The RFQ is not in a state that allows sending a quotation",
+      },
+      APPROVED_SNAPSHOT_MISSING: {
+        status: 409,
+        message:
+          "An immutable approved quotation snapshot is required before it can be marked sent",
       },
     };
 
@@ -991,7 +1144,11 @@ export const downloadQuotationPdf = async (
 
     const quotation = await prisma.quotation.findUnique({
       where: { id: quotationId },
-      include: quotationInclude,
+      select: {
+        quotationNumber: true,
+        status: true,
+        approvedSnapshot: true,
+      },
     });
 
     if (!quotation) {
@@ -1011,7 +1168,16 @@ export const downloadQuotationPdf = async (
       });
     }
 
-    const pdf = await generateQuotationPdf(quotation);
+    if (!isApprovedQuotationSnapshot(quotation.approvedSnapshot)) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "An immutable approved quotation snapshot is unavailable for this record",
+      });
+    }
+
+    const pdf = await generateQuotationPdf(quotation.approvedSnapshot);
+
 
     const filename = `${quotation.quotationNumber}.pdf`;
 
