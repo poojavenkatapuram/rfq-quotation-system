@@ -547,12 +547,14 @@ export async function extractSupplementaryRfqSuggestions(
 
   try {
     const fetchImpl = options.fetchImpl ?? fetch;
-    const response = await fetchImpl(OLLAMA_RFQ_GENERATE_URL, {
+    const apiKey = process.env.OLLAMA_API_KEY?.trim();
+    const response = await fetchImpl(`${runtimeSettings.baseUrl}/api/generate`, {
       method: "POST",
       redirect: "error",
       headers: {
         "content-type": "application/json",
         accept: "application/json",
+        ...(apiKey && { authorization: `Bearer ${apiKey}` }),
       },
       body: JSON.stringify({
         model: getOllamaRfqModel(),

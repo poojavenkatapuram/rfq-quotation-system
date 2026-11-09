@@ -161,6 +161,21 @@ describe("local Ollama RFQ extraction", () => {
     expect(body.prompt).toContain("Cycle Time: 3.20 min");
   });
 
+  it("sends remote Ollama requests over configured HTTPS with a server-side bearer key", async () => {
+    vi.stubEnv("OLLAMA_RFQ_BASE_URL", "https://ollama.com/");
+    vi.stubEnv("OLLAMA_API_KEY", "synthetic-server-only-key");
+    const fetchImpl = vi.fn().mockResolvedValue(generateResponse([]));
+
+    await extractSupplementaryRfqSuggestions(
+      [source], [], { fetchImpl: asFetchImplementation(fetchImpl) }
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://ollama.com/api/generate");
+    expect(new Headers(request.headers).get("authorization")).toBe("Bearer synthetic-server-only-key");
+  });
+
   it("returns only validated aggregate inference timing and token metrics", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(generateResponse([], {
       load_duration: 64_350_000_000,

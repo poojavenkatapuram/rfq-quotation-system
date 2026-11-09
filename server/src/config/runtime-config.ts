@@ -8,6 +8,7 @@ export const DEFAULT_OLLAMA_RFQ_NUM_GPU = 0;
 export const DEFAULT_OLLAMA_RFQ_NUM_THREAD = 4;
 export const DEFAULT_OLLAMA_RFQ_TIMEOUT_MS = 180_000;
 export const DEFAULT_OLLAMA_RFQ_KEEP_ALIVE = "2m";
+export const DEFAULT_OLLAMA_RFQ_BASE_URL = "http://127.0.0.1:11434";
 const MIN_OLLAMA_RFQ_TIMEOUT_MS = 90_000;
 const MAX_OLLAMA_RFQ_TIMEOUT_MS = 600_000;
 const MAX_OLLAMA_RFQ_NUM_GPU = 128;
@@ -15,10 +16,32 @@ const MAX_OLLAMA_RFQ_NUM_THREAD = 64;
 const MAX_OLLAMA_RFQ_KEEP_ALIVE_MS = 10 * 60 * 1000;
 
 export interface OllamaRfqRuntimeSettings {
+  baseUrl: string;
   numGpu: number;
   numThread: number;
   timeoutMs: number;
   keepAlive: string;
+}
+
+export function getOllamaRfqBaseUrl(environment: Environment = process.env): string {
+  const rawBaseUrl = environment.OLLAMA_RFQ_BASE_URL?.trim() || DEFAULT_OLLAMA_RFQ_BASE_URL;
+  let url: URL;
+
+  try {
+    url = new URL(rawBaseUrl);
+  } catch {
+    throw new Error("OLLAMA_RFQ_BASE_URL must be a valid HTTP(S) URL");
+  }
+
+  const isLoopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (
+    (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback)) ||
+    url.username || url.password || url.search || url.hash
+  ) {
+    throw new Error("OLLAMA_RFQ_BASE_URL must use HTTPS remotely, or HTTP on loopback, without URL credentials or query values");
+  }
+
+  return url.href.replace(/\/+$/, "");
 }
 
 function parseKeepAliveMilliseconds(value: string): number | undefined {
@@ -35,6 +58,7 @@ function parseKeepAliveMilliseconds(value: string): number | undefined {
 export function getOllamaRfqRuntimeSettings(
   environment: Environment = process.env
 ): OllamaRfqRuntimeSettings {
+  const baseUrl = getOllamaRfqBaseUrl(environment);
   const rawNumGpu = environment.OLLAMA_RFQ_NUM_GPU?.trim() ?? String(DEFAULT_OLLAMA_RFQ_NUM_GPU);
   if (!/^\d+$/.test(rawNumGpu) || Number(rawNumGpu) > MAX_OLLAMA_RFQ_NUM_GPU) {
     throw new Error("OLLAMA_RFQ_NUM_GPU must be an integer from 0 to 128 (0 selects CPU-only inference)");
@@ -57,7 +81,7 @@ export function getOllamaRfqRuntimeSettings(
     throw new Error("OLLAMA_RFQ_KEEP_ALIVE must be 0 or a duration up to 10m, such as 2m");
   }
 
-  return { numGpu: Number(rawNumGpu), numThread: Number(rawNumThread), timeoutMs, keepAlive };
+  return { baseUrl, numGpu: Number(rawNumGpu), numThread: Number(rawNumThread), timeoutMs, keepAlive };
 }
 
 function configuredClientUrl(environment: Environment): URL | undefined {
@@ -108,6 +132,8 @@ export function validateRuntimeConfiguration(
   const storageDirectory = environment.RFQ_DOCUMENT_STORAGE_DIR?.trim();
   const clientUrl = configuredClientUrl(environment);
   const localAiEnabled = environment.LOCAL_AI_ENABLED?.trim().toLowerCase();
+  const ollamaBaseUrl = getOllamaRfqBaseUrl(environment);
+  const ollamaApiKey = environment.OLLAMA_API_KEY?.trim();
   const proxyHops = getTrustProxyHops(environment);
 
   if (!isPostgresDatabaseUrl(databaseUrl)) {
@@ -131,6 +157,13 @@ export function validateRuntimeConfiguration(
     localAiEnabled !== "false"
   ) {
     problems.push("LOCAL_AI_ENABLED must be true or false when configured");
+  }
+  if (
+    localAiEnabled === "true" &&
+    !["http://localhost:11434", "http://127.0.0.1:11434", "http://[::1]:11434"].includes(ollamaBaseUrl) &&
+    !ollamaApiKey
+  ) {
+    problems.push("OLLAMA_API_KEY is required when local AI is enabled with a remote Ollama endpoint");
   }
 
   if (problems.length > 0) {
