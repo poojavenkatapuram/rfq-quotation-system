@@ -111,7 +111,7 @@ Costing uses the application's existing deterministic calculation service and su
 
 ## AI-assisted intake and routing
 
-PDF, XLSX, and `.eml` extraction are implemented. Deterministic extraction remains available, and local Ollama integration can provide supplementary suggestions. Suggestions are validated against source evidence and require human review; they do not create approved costing or quotations. No external AI service is used. In the tested WSL environment, Ollama's endpoint responded, but inference with the installed `qwen2.5:1.5b` model timed out, so useful live model output is **not verified**. Do not describe the current environment as having verified live inference. Troubleshoot local Ollama health/model readiness and test with synthetic content before enabling it; do not send confidential RFQs externally. Email attachments are not extracted from `.eml` and must be uploaded separately. Outlook `.msg` is unsupported. Routing recommendations use historical similarity matching, not a generative model.
+PDF, XLSX, and `.eml` extraction are implemented. Deterministic extraction remains available, and local Ollama integration can provide supplementary suggestions. Suggestions are validated against source evidence and require human review; they do not create approved costing or quotations. No external AI service is used. A bounded synthetic service-level run with `qwen2.5:1.5b`, CPU-only inference, and four threads produced a validated `cycleTimeMinutes: 4.8` suggestion with literal workbook evidence in 137.8 seconds (model load 76.9s, prompt evaluation 30.8s, generation 28.3s). A prior run using the default CPU thread count timed out at 180 seconds, and an existing browser extraction job also recorded a timeout before the thread limit was added. Live AI therefore works in a tested service call but is **not yet demonstrated as reliably completing through the browser and database workflow**; deterministic extraction and human review remain available. Test with synthetic content before enabling it for operational use; do not send confidential RFQs externally. Email attachments are not extracted from `.eml` and must be uploaded separately. Outlook `.msg` is unsupported. Routing recommendations use historical similarity matching, not a generative model.
 
 ## Synthetic historical dataset
 
@@ -135,7 +135,7 @@ These test/build commands do not apply migrations or seed data. The database int
 
 ## Known limitations
 
-- Live local Ollama inference timed out in the tested WSL environment; deterministic extraction remains available, but model-generated output has not been verified in that environment.
+- Local `qwen2.5:1.5b` inference produced a validated synthetic suggestion through the extraction service in 137.8 seconds with four CPU threads. A prior request timed out at 180 seconds, and browser/database completion after the thread-limit change remains unverified; do not treat local inference as reliable for operational SLAs.
 - `.eml` attachments must be uploaded separately; Outlook `.msg` is unsupported.
 - Routing suggestions are historical similarity recommendations, not AI-generated process plans.
 - Historical imports contain synthetic commercial rows only and cannot reconstruct original manufacturing cost, routing, or approval evidence.
