@@ -4,16 +4,13 @@ services:
     runtime: node
     rootDir: server
     region: singapore
-    plan: 0.5c-1g
+    plan: free
     autoDeployTrigger: off
     buildCommand: npm ci && npx prisma generate && npm run build
-    preDeployCommand: npx prisma migrate deploy
-    startCommand: npm start
+    # Render Free does not support pre-deploy commands. This runs only the
+    # checked-in additive Prisma migrations against the configured DATABASE_URL.
+    startCommand: npx prisma migrate deploy && npm start
     healthCheckPath: /api/health/database
-    disk:
-      name: rfq-documents
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
@@ -25,8 +22,16 @@ services:
         sync: false
       - key: TRUST_PROXY_HOPS
         value: "1"
-      - key: RFQ_DOCUMENT_STORAGE_DIR
-        value: /var/data/rfq-documents
+      - key: RFQ_DOCUMENT_STORAGE_PROVIDER
+        value: r2
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
       - key: LOCAL_AI_ENABLED
         value: "false"
 
