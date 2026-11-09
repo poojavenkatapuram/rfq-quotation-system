@@ -322,6 +322,7 @@ export default function RFQIntake() {
         <div className="intake-supported">
           <span><FileText size={15} /> PDF drawings</span>
           <span><FileSpreadsheet size={15} /> XLSX sheets</span>
+          <span><Mail size={15} /> EML emails</span>
         </div>
       </div>
       {error && <div className="intake-alert intake-error"><AlertCircle size={17} /><span>{error}</span></div>}

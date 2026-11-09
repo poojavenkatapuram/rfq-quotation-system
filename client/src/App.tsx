@@ -7,7 +7,6 @@ import {
   IndianRupee,
   History,
   Settings,
-  Bell,
   LogOut,
   Menu,
   X,
@@ -202,15 +201,6 @@ function AppContent() {
           </div>
 
           <div className="topbar-right">
-            <div className="system-status">
-              <span className="online-dot" />
-              System operational
-            </div>
-            <button className="icon-button" aria-label="Notifications">
-              <Bell size={19} />
-              <span className="notification-dot" />
-            </button>
-            <div className="topbar-divider" />
             <div className="topbar-date">
               <span>PLANT LOCATION</span>
               <strong>Chakan, Pune</strong>
