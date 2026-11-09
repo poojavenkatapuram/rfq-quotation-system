@@ -13,3 +13,8 @@ coverage/
 # Temporary editor files
 *.swp
 *.swo
+
+# Private RFQ documents and temporary uploads
+server/storage/
+server/uploads/
+server/tmp/

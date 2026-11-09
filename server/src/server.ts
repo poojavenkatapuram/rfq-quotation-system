@@ -5,6 +5,12 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import prisma from "./lib/prisma.js";
+import { apiErrorHandler } from "./middleware/api-error.middleware.js";
+import {
+  getClientOrigin,
+  getTrustProxyHops,
+  validateRuntimeConfiguration,
+} from "./config/runtime-config.js";
 
 // Route imports
 import authRoutes from "./routes/auth.routes.js";
@@ -18,13 +24,15 @@ import quotationRoutes from "./routes/quotation.routes.js";
 import partRoutes from "./routes/part.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import userRoutes from "./routes/user.routes.js";
+import settingsRoutes from "./routes/settings.routes.js";
 import historyRoutes from "./routes/history.routes.js";
+import documentIntakeRoutes from "./routes/document-intake.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
-
-const allowedOrigin =
-  process.env.CLIENT_URL || "http://localhost:5173";
+validateRuntimeConfiguration();
+app.set("trust proxy", getTrustProxyHops());
+const allowedOrigin = getClientOrigin();
 
 // Security middleware
 app.use(helmet());
@@ -80,7 +88,9 @@ app.use("/api/costings", costingRoutes);
 app.use("/api/quotations", quotationRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/settings", settingsRoutes);
 app.use("/api/history", historyRoutes);
+app.use("/api/document-intake", documentIntakeRoutes);
 
 // Handle unknown API routes
 app.use((_req, res) => {
@@ -89,6 +99,8 @@ app.use((_req, res) => {
     message: "API endpoint not found",
   });
 });
+
+app.use(apiErrorHandler);
 
 // Start server
 const server = app.listen(PORT, () => {
