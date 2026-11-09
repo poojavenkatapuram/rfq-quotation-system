@@ -40,7 +40,11 @@ export const getDashboardSummary = async (
       prisma.auditLog.findMany({
         take: 8,
         orderBy: { createdAt: "desc" },
-        include: {
+        select: {
+          id: true,
+          action: true,
+          entityType: true,
+          createdAt: true,
           actor: {
             select: { name: true },
           },

@@ -165,6 +165,13 @@ describe("Dashboard Controller", () => {
       expect.objectContaining({
         take: 8,
         orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          action: true,
+          entityType: true,
+          createdAt: true,
+          actor: { select: { name: true } },
+        },
       }),
     );
 
