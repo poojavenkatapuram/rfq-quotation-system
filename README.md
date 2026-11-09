@@ -32,7 +32,7 @@ The application does not send quotations by email or synchronize mailboxes. The 
 - Node.js, Express, TypeScript, Zod
 - PostgreSQL and Prisma ORM
 - Vitest and Supertest; ExcelJS for workbook handling; PDFKit for quotation PDFs
-- Optional local Ollama integration for supplementary RFQ extraction suggestions
+- Optional local or explicitly configured HTTPS Ollama-compatible integration for supplementary RFQ extraction suggestions
 
 ## Prerequisites
 
@@ -113,7 +113,7 @@ Costing uses the application's existing deterministic calculation service and su
 
 ## AI-assisted intake and routing
 
-PDF, XLSX, and `.eml` extraction are implemented. Deterministic extraction remains available, and local Ollama integration can provide supplementary suggestions. Suggestions are validated against source evidence and require human review; they do not create approved costing or quotations. No external AI service is used. A bounded synthetic service-level run with `qwen2.5:1.5b`, CPU-only inference, and four threads produced a validated `cycleTimeMinutes: 4.8` suggestion with literal workbook evidence in 137.8 seconds (model load 76.9s, prompt evaluation 30.8s, generation 28.3s). A prior run using the default CPU thread count timed out at 180 seconds, and an existing browser extraction job also recorded a timeout before the thread limit was added. Live AI therefore works in a tested service call but is **not yet demonstrated as reliably completing through the browser and database workflow**; deterministic extraction and human review remain available. Test with synthetic content before enabling it for operational use; do not send confidential RFQs externally. Email attachments are not extracted from `.eml` and must be uploaded separately. Outlook `.msg` is unsupported. Routing recommendations use historical similarity matching, not a generative model.
+PDF, XLSX, and `.eml` extraction are implemented. Deterministic extraction remains available, and Ollama can provide supplementary suggestions when explicitly configured. Suggestions are validated against source evidence and require human review; they do not create approved costing or quotations. A bounded synthetic service-level run with `qwen2.5:1.5b`, CPU-only inference, and four threads produced a validated `cycleTimeMinutes: 4.8` suggestion with literal workbook evidence in 137.8 seconds (model load 76.9s, prompt evaluation 30.8s, generation 28.3s). Browser/database completion after the thread-limit change remains unverified. Local inference was tested in WSL; a remote hosted endpoint requires separate configuration, free-quota/account verification, and Company A approval before any customer content is sent. Deterministic extraction and human review remain available if inference is unavailable. Email attachments are not extracted from `.eml` and must be uploaded separately. Outlook `.msg` is unsupported. Routing recommendations use historical similarity matching, not a generative model.
 
 ## Synthetic historical dataset
 
