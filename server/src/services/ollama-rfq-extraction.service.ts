@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  DEFAULT_OLLAMA_RFQ_TIMEOUT_MS,
+  getOllamaRfqRuntimeSettings,
+} from "../config/runtime-config.js";
 import { isNumericRfqField, numericValueFromEvidence } from "./rfq-field-validation.js";
 import type {
   ExtractedCandidate,
@@ -8,7 +12,7 @@ import type {
 export const OLLAMA_RFQ_GENERATE_URL =
   "http://127.0.0.1:11434/api/generate";
 export const DEFAULT_OLLAMA_RFQ_MODEL = "qwen2.5:1.5b";
-export const OLLAMA_REQUEST_TIMEOUT_MS = 75_000;
+export const OLLAMA_REQUEST_TIMEOUT_MS = DEFAULT_OLLAMA_RFQ_TIMEOUT_MS;
 export const MAX_OLLAMA_SOURCE_TEXT_CHARACTERS = 12_000;
 export const MAX_OLLAMA_RESPONSE_BYTES = 128 * 1024;
 
@@ -92,6 +96,15 @@ export interface OllamaRfqExtractionResult {
   suggestions: ValidatedOllamaSuggestion[];
   failureReason?: OllamaFailureReason;
   diagnostics?: OllamaValidationDiagnostics;
+  inferenceMetrics?: OllamaInferenceMetrics;
+}
+
+export interface OllamaInferenceMetrics {
+  modelLoadDurationMs?: number;
+  promptEvaluationDurationMs?: number;
+  generationDurationMs?: number;
+  promptTokenCount?: number;
+  generatedTokenCount?: number;
 }
 
 export interface OllamaValidationDiagnostics {
@@ -475,6 +488,36 @@ function withDiagnostics(
   return includeDiagnostics ? { ...result, diagnostics } : result;
 }
 
+function safeInferenceMetrics(response: Record<string, unknown>): OllamaInferenceMetrics | undefined {
+  const durationMs = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+      ? Math.round((value / 1_000_000) * 100) / 100
+      : undefined;
+  const tokenCount = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+      ? value
+      : undefined;
+
+  const metrics: OllamaInferenceMetrics = {
+    modelLoadDurationMs: durationMs(response.load_duration),
+    promptEvaluationDurationMs: durationMs(response.prompt_eval_duration),
+    generationDurationMs: durationMs(response.eval_duration),
+    promptTokenCount: tokenCount(response.prompt_eval_count),
+    generatedTokenCount: tokenCount(response.eval_count),
+  };
+
+  return Object.values(metrics).some((value) => value !== undefined)
+    ? metrics
+    : undefined;
+}
+
+function withInferenceMetrics(
+  result: OllamaRfqExtractionResult,
+  inferenceMetrics: OllamaInferenceMetrics | undefined
+): OllamaRfqExtractionResult {
+  return inferenceMetrics ? { ...result, inferenceMetrics } : result;
+}
+
 export async function extractSupplementaryRfqSuggestions(
   textSources: readonly ExtractedTextSource[],
   deterministicCandidates: readonly Pick<ExtractedCandidate, "fieldName" | "sourceId">[],
@@ -487,6 +530,8 @@ export async function extractSupplementaryRfqSuggestions(
     return withDiagnostics({ suggestions: [] }, diagnostics, options.includeDiagnostics);
   }
 
+  const runtimeSettings = getOllamaRfqRuntimeSettings();
+
   if (isOllamaGenerationActive) {
     return withDiagnostics(fallback("BUSY"), diagnostics, options.includeDiagnostics);
   }
@@ -498,7 +543,7 @@ export async function extractSupplementaryRfqSuggestions(
   const timeout = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, OLLAMA_REQUEST_TIMEOUT_MS);
+  }, runtimeSettings.timeoutMs);
 
   try {
     const fetchImpl = options.fetchImpl ?? fetch;
@@ -513,11 +558,14 @@ export async function extractSupplementaryRfqSuggestions(
         model: getOllamaRfqModel(),
         prompt: buildPrompt(boundedSources, deterministicCandidates),
         stream: false,
+        keep_alive: runtimeSettings.keepAlive,
         format: buildResponseSchema(boundedSources, deterministicCandidates),
         options: {
           temperature: 0,
           num_ctx: 4096,
           num_predict: 1024,
+          num_gpu: runtimeSettings.numGpu,
+          num_thread: runtimeSettings.numThread,
         },
       }),
       signal: controller.signal,
@@ -536,13 +584,19 @@ export async function extractSupplementaryRfqSuggestions(
       return withDiagnostics(fallback("MALFORMED_RESPONSE"), diagnostics, options.includeDiagnostics);
     }
 
-    if (
-      !parsedOuterResponse ||
-      typeof parsedOuterResponse !== "object" ||
-      typeof (parsedOuterResponse as { response?: unknown }).response !==
-        "string"
-    ) {
+    if (!parsedOuterResponse || typeof parsedOuterResponse !== "object") {
       return withDiagnostics(fallback("MALFORMED_RESPONSE"), diagnostics, options.includeDiagnostics);
+    }
+
+    const inferenceMetrics = safeInferenceMetrics(
+      parsedOuterResponse as Record<string, unknown>
+    );
+    if (typeof (parsedOuterResponse as { response?: unknown }).response !== "string") {
+      return withDiagnostics(
+        withInferenceMetrics(fallback("MALFORMED_RESPONSE"), inferenceMetrics),
+        diagnostics,
+        options.includeDiagnostics
+      );
     }
 
     let parsedModelResponse: unknown;
@@ -552,13 +606,21 @@ export async function extractSupplementaryRfqSuggestions(
         (parsedOuterResponse as { response: string }).response
       );
     } catch {
-      return withDiagnostics(fallback("MALFORMED_RESPONSE"), diagnostics, options.includeDiagnostics);
+      return withDiagnostics(
+        withInferenceMetrics(fallback("MALFORMED_RESPONSE"), inferenceMetrics),
+        diagnostics,
+        options.includeDiagnostics
+      );
     }
 
     const envelope = modelResponseSchema.safeParse(parsedModelResponse);
 
     if (!envelope.success) {
-      return withDiagnostics(fallback("MALFORMED_RESPONSE"), diagnostics, options.includeDiagnostics);
+      return withDiagnostics(
+        withInferenceMetrics(fallback("MALFORMED_RESPONSE"), inferenceMetrics),
+        diagnostics,
+        options.includeDiagnostics
+      );
     }
 
     const sourcesById = new Map(
@@ -606,7 +668,7 @@ export async function extractSupplementaryRfqSuggestions(
       suggestions.push(suggestion);
     }
 
-    return withDiagnostics({ suggestions }, diagnostics, options.includeDiagnostics);
+    return withDiagnostics({ suggestions, ...(inferenceMetrics && { inferenceMetrics }) }, diagnostics, options.includeDiagnostics);
   } catch (error) {
     if (error instanceof ResponseSizeLimitError) {
       return withDiagnostics(fallback("RESPONSE_TOO_LARGE"), diagnostics, options.includeDiagnostics);

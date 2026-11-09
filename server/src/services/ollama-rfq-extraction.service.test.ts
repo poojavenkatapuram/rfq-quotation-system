@@ -21,10 +21,14 @@ const source: ExtractedTextSource = {
   ].join("\n"),
 };
 
-function generateResponse(suggestions: unknown): Response {
+function generateResponse(
+  suggestions: unknown,
+  metrics: Record<string, unknown> = {}
+): Response {
   return new Response(
     JSON.stringify({
       response: JSON.stringify({ suggestions }),
+      ...metrics,
     })
   );
 }
@@ -35,6 +39,7 @@ function asFetchImplementation(mock: ReturnType<typeof vi.fn>): typeof fetch {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 describe("local Ollama RFQ extraction", () => {
@@ -128,6 +133,7 @@ describe("local Ollama RFQ extraction", () => {
     expect(request.redirect).toBe("error");
     expect(body.model).toBe(DEFAULT_OLLAMA_RFQ_MODEL);
     expect(body.stream).toBe(false);
+    expect(body.keep_alive).toBe("2m");
     expect(body.format).toMatchObject({
       type: "object",
       required: ["suggestions"],
@@ -147,10 +153,72 @@ describe("local Ollama RFQ extraction", () => {
       temperature: 0,
       num_ctx: 4096,
       num_predict: 1024,
+      num_gpu: 0,
+      num_thread: 4,
     });
     expect(body.prompt).not.toContain("RFQ No: RFQ-101");
     expect(body.prompt).toContain("alreadyExtractedFields");
     expect(body.prompt).toContain("Cycle Time: 3.20 min");
+  });
+
+  it("returns only validated aggregate inference timing and token metrics", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(generateResponse([], {
+      load_duration: 64_350_000_000,
+      prompt_eval_duration: 1_234_567_890,
+      eval_duration: 2_345_678_901,
+      prompt_eval_count: 840,
+      eval_count: 176,
+      prompt: "must not be returned",
+    }));
+
+    await expect(extractSupplementaryRfqSuggestions(
+      [source], [], { fetchImpl: asFetchImplementation(fetchImpl) }
+    )).resolves.toEqual({
+      suggestions: [],
+      inferenceMetrics: {
+        modelLoadDurationMs: 64_350,
+        promptEvaluationDurationMs: 1_234.57,
+        generationDurationMs: 2_345.68,
+        promptTokenCount: 840,
+        generatedTokenCount: 176,
+      },
+    });
+  });
+
+  it("ignores invalid Ollama metric values without affecting validated suggestions", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(generateResponse([], {
+      load_duration: -1,
+      prompt_eval_duration: "private",
+      eval_duration: Number.MAX_SAFE_INTEGER + 1,
+      prompt_eval_count: 2.5,
+      eval_count: 12,
+    }));
+
+    await expect(extractSupplementaryRfqSuggestions(
+      [source], [], { fetchImpl: asFetchImplementation(fetchImpl) }
+    )).resolves.toEqual({
+      suggestions: [],
+      inferenceMetrics: { generatedTokenCount: 12 },
+    });
+  });
+
+  it("retains safe inference metrics when structured model output is malformed", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      response: "{bad",
+      load_duration: 3_000_000_000,
+      prompt_eval_count: 12,
+    })));
+
+    await expect(extractSupplementaryRfqSuggestions(
+      [source], [], { fetchImpl: asFetchImplementation(fetchImpl) }
+    )).resolves.toEqual({
+      suggestions: [],
+      failureReason: "MALFORMED_RESPONSE",
+      inferenceMetrics: {
+        modelLoadDurationMs: 3_000,
+        promptTokenCount: 12,
+      },
+    });
   });
 
   it("uses a valid configured local model name and rejects an unsafe override", () => {
@@ -453,7 +521,7 @@ describe("local Ollama RFQ extraction", () => {
 
   it("falls back on the local request timeout", async () => {
     vi.useFakeTimers();
-    expect(OLLAMA_REQUEST_TIMEOUT_MS).toBe(75_000);
+    expect(OLLAMA_REQUEST_TIMEOUT_MS).toBe(180_000);
 
     const fetchImpl = vi.fn(
       (_url: string, request: RequestInit) =>
@@ -481,6 +549,31 @@ describe("local Ollama RFQ extraction", () => {
     await expect(resultPromise).resolves.toEqual({
       suggestions: [],
       failureReason: "TIMEOUT",
+    });
+  });
+
+  it("uses the validated configurable request timeout", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("OLLAMA_RFQ_TIMEOUT_MS", "120000");
+    const fetchImpl = vi.fn(
+      (_url: string, request: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          request.signal?.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            { once: true }
+          );
+        })
+    );
+    const resultPromise = extractSupplementaryRfqSuggestions(
+      [source], [], { fetchImpl: asFetchImplementation(fetchImpl) }
+    );
+
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(fetchImpl.mock.calls[0]?.[1].signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(resultPromise).resolves.toEqual({
+      suggestions: [], failureReason: "TIMEOUT",
     });
   });
 

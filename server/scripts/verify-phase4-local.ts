@@ -24,6 +24,7 @@ async function main() {
       sourceReferences: [...new Set(extraction.candidates.map((field) => field.sourceReference))],
       warnings: extraction.warnings ?? [], aiRespondedWithValidJson: !ai.failureReason,
       failureReason: ai.failureReason ?? null, elapsedMs: Date.now() - start,
+      inferenceMetrics: ai.inferenceMetrics ?? null,
       rawSuggestions: ai.diagnostics?.rawSuggestionCount ?? 0,
       ...(process.argv.includes("--diagnostics") && { syntheticModelOutput: ai.diagnostics?.rawSuggestions }),
       validatedSuggestions: ai.suggestions.map(({ fieldName, extractedValue, sourceReference }) => ({ fieldName, extractedValue, sourceReference })),

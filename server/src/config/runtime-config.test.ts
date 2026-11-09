@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   getClientOrigin,
+  getOllamaRfqRuntimeSettings,
   getTrustProxyHops,
   validateRuntimeConfiguration,
 } from "./runtime-config.js";
@@ -59,5 +60,37 @@ describe("runtime configuration", () => {
     );
     expect(getTrustProxyHops({ TRUST_PROXY_HOPS: "2" })).toBe(2);
     expect(getTrustProxyHops({ TRUST_PROXY_HOPS: "not-a-number" })).toBe(0);
+  });
+
+  it("uses conservative CPU-only Ollama defaults and accepts validated overrides", () => {
+    expect(getOllamaRfqRuntimeSettings({})).toEqual({
+      numGpu: 0,
+      numThread: 4,
+      timeoutMs: 180_000,
+      keepAlive: "2m",
+    });
+    expect(getOllamaRfqRuntimeSettings({
+      OLLAMA_RFQ_NUM_GPU: "0",
+      OLLAMA_RFQ_NUM_THREAD: "4",
+      OLLAMA_RFQ_TIMEOUT_MS: "240000",
+      OLLAMA_RFQ_KEEP_ALIVE: "5m",
+    })).toEqual({ numGpu: 0, numThread: 4, timeoutMs: 240_000, keepAlive: "5m" });
+  });
+
+  it.each([
+    ["OLLAMA_RFQ_NUM_GPU", "-1"],
+    ["OLLAMA_RFQ_NUM_GPU", "1.5"],
+    ["OLLAMA_RFQ_NUM_GPU", "129"],
+    ["OLLAMA_RFQ_NUM_THREAD", "0"],
+    ["OLLAMA_RFQ_NUM_THREAD", "65"],
+    ["OLLAMA_RFQ_NUM_THREAD", "2.5"],
+    ["OLLAMA_RFQ_TIMEOUT_MS", "89999"],
+    ["OLLAMA_RFQ_TIMEOUT_MS", "600001"],
+    ["OLLAMA_RFQ_TIMEOUT_MS", "1m"],
+    ["OLLAMA_RFQ_KEEP_ALIVE", "forever"],
+    ["OLLAMA_RFQ_KEEP_ALIVE", "11m"],
+  ])("rejects invalid %s configuration", (name, value) => {
+    expect(() => getOllamaRfqRuntimeSettings({ [name]: value })).toThrow(name);
+    expect(() => validateRuntimeConfiguration({ [name]: value })).toThrow(name);
   });
 });

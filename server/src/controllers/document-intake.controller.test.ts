@@ -177,6 +177,13 @@ describe("document intake local AI integration", () => {
 
   it("saves validated AI suggestions only after deterministic candidates", async () => {
     mocks.extractSupplementaryRfqSuggestions.mockResolvedValue({
+      inferenceMetrics: {
+        modelLoadDurationMs: 64_350,
+        promptEvaluationDurationMs: 1_234.57,
+        generationDurationMs: 2_345.68,
+        promptTokenCount: 840,
+        generatedTokenCount: 176,
+      },
       suggestions: [
         {
           fieldName: "materialGrade",
@@ -228,6 +235,22 @@ describe("document intake local AI integration", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           provider: "LOCAL_OLLAMA",
+        }),
+      })
+    );
+    expect(mocks.auditLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: "DOCUMENT_EXTRACTION_COMPLETED",
+          details: expect.objectContaining({
+            aiInferenceMetrics: {
+              modelLoadDurationMs: 64_350,
+              promptEvaluationDurationMs: 1_234.57,
+              generationDurationMs: 2_345.68,
+              promptTokenCount: 840,
+              generatedTokenCount: 176,
+            },
+          }),
         }),
       })
     );
@@ -741,6 +764,36 @@ describe("document intake review and ownership safeguards", () => {
     expect(mocks.extractDocumentContent).not.toHaveBeenCalled();
     expect(mocks.writeFile).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ extractionJob: existing }));
+  });
+
+  it("returns a duplicate failed job for its safe retry action without replacing its audit or reviews", async () => {
+    const existing = {
+      id: "job-failed",
+      status: "FAILED",
+      errorMessage: "Unable to extract document content",
+      fields: [{ id: "review-1", reviewStatus: "REJECTED", acceptedValue: null, isAccepted: false }],
+      attachment: { id: "attachment-failed", fileName: "synthetic.xlsx" },
+    };
+    mocks.attachmentFindFirst.mockResolvedValue({
+      id: "attachment-failed",
+      extractionJobs: [existing],
+    });
+    const res = createResponse();
+
+    await uploadAndExtractDocument(
+      createRequest() as unknown as Parameters<typeof uploadAndExtractDocument>[0],
+      res as unknown as Parameters<typeof uploadAndExtractDocument>[1]
+    );
+
+    expect(res.status).toHaveBeenCalledWith(422);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      extractionJob: existing,
+      duplicateOfAttachmentId: "attachment-failed",
+    }));
+    expect(mocks.attachmentCreate).not.toHaveBeenCalled();
+    expect(mocks.extractionJobCreate).not.toHaveBeenCalled();
+    expect(mocks.extractDocumentContent).not.toHaveBeenCalled();
+    expect(mocks.auditLogCreate).not.toHaveBeenCalled();
   });
 
   it("returns failed jobs as retryable cards and retains their stored upload", async () => {

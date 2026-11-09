@@ -6,7 +6,10 @@ import {
   extractDocumentContent,
   DocumentProcessingError,
 } from "../services/rfq-document-extraction.service.js";
-import { extractSupplementaryRfqSuggestions } from "../services/ollama-rfq-extraction.service.js";
+import {
+  extractSupplementaryRfqSuggestions,
+  type OllamaInferenceMetrics,
+} from "../services/ollama-rfq-extraction.service.js";
 import { ExtractionFieldReviewStatus, ExtractionStatus } from "@prisma/client";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -149,6 +152,7 @@ async function runDocumentExtraction(input: {
     );
     let supplementaryCandidates: typeof deterministicCandidates = [];
     let aiFailureReason: string | undefined;
+    let aiInferenceMetrics: OllamaInferenceMetrics | undefined;
 
     if (isLocalAiEnabled() && extractionResult.textSources.length > 0) {
       try {
@@ -157,6 +161,7 @@ async function runDocumentExtraction(input: {
           deterministicCandidates
         );
         aiFailureReason = aiResult.failureReason;
+        aiInferenceMetrics = aiResult.inferenceMetrics;
 
         supplementaryCandidates = aiResult.suggestions
           .filter((suggestion) => {
@@ -233,6 +238,15 @@ async function runDocumentExtraction(input: {
             deterministicFieldCount: deterministicCandidates.length,
             aiSuggestionCount: supplementaryCandidates.length,
             aiFailureReason,
+            aiInferenceMetrics: aiInferenceMetrics
+              ? {
+                  modelLoadDurationMs: aiInferenceMetrics.modelLoadDurationMs ?? null,
+                  promptEvaluationDurationMs: aiInferenceMetrics.promptEvaluationDurationMs ?? null,
+                  generationDurationMs: aiInferenceMetrics.generationDurationMs ?? null,
+                  promptTokenCount: aiInferenceMetrics.promptTokenCount ?? null,
+                  generatedTokenCount: aiInferenceMetrics.generatedTokenCount ?? null,
+                }
+              : null,
             warnings,
             extractionMethod: provider,
           },

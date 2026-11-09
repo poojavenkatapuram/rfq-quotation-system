@@ -4,6 +4,62 @@ type Environment = NodeJS.ProcessEnv;
 
 const developmentDefaultClientOrigin = "http://localhost:5173";
 
+export const DEFAULT_OLLAMA_RFQ_NUM_GPU = 0;
+export const DEFAULT_OLLAMA_RFQ_NUM_THREAD = 4;
+export const DEFAULT_OLLAMA_RFQ_TIMEOUT_MS = 180_000;
+export const DEFAULT_OLLAMA_RFQ_KEEP_ALIVE = "2m";
+const MIN_OLLAMA_RFQ_TIMEOUT_MS = 90_000;
+const MAX_OLLAMA_RFQ_TIMEOUT_MS = 600_000;
+const MAX_OLLAMA_RFQ_NUM_GPU = 128;
+const MAX_OLLAMA_RFQ_NUM_THREAD = 64;
+const MAX_OLLAMA_RFQ_KEEP_ALIVE_MS = 10 * 60 * 1000;
+
+export interface OllamaRfqRuntimeSettings {
+  numGpu: number;
+  numThread: number;
+  timeoutMs: number;
+  keepAlive: string;
+}
+
+function parseKeepAliveMilliseconds(value: string): number | undefined {
+  if (value === "0") return 0;
+  const match = value.match(/^(\d+)(ms|s|m|h)$/);
+  if (!match) return undefined;
+
+  const amount = Number(match[1]);
+  const multiplier = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 }[match[2] as "ms" | "s" | "m" | "h"];
+  const duration = amount * multiplier;
+  return Number.isSafeInteger(duration) ? duration : undefined;
+}
+
+export function getOllamaRfqRuntimeSettings(
+  environment: Environment = process.env
+): OllamaRfqRuntimeSettings {
+  const rawNumGpu = environment.OLLAMA_RFQ_NUM_GPU?.trim() ?? String(DEFAULT_OLLAMA_RFQ_NUM_GPU);
+  if (!/^\d+$/.test(rawNumGpu) || Number(rawNumGpu) > MAX_OLLAMA_RFQ_NUM_GPU) {
+    throw new Error("OLLAMA_RFQ_NUM_GPU must be an integer from 0 to 128 (0 selects CPU-only inference)");
+  }
+
+  const rawNumThread = environment.OLLAMA_RFQ_NUM_THREAD?.trim() ?? String(DEFAULT_OLLAMA_RFQ_NUM_THREAD);
+  if (!/^\d+$/.test(rawNumThread) || Number(rawNumThread) < 1 || Number(rawNumThread) > MAX_OLLAMA_RFQ_NUM_THREAD) {
+    throw new Error("OLLAMA_RFQ_NUM_THREAD must be an integer from 1 to 64");
+  }
+
+  const rawTimeout = environment.OLLAMA_RFQ_TIMEOUT_MS?.trim() ?? String(DEFAULT_OLLAMA_RFQ_TIMEOUT_MS);
+  const timeoutMs = Number(rawTimeout);
+  if (!/^\d+$/.test(rawTimeout) || !Number.isSafeInteger(timeoutMs) || timeoutMs < MIN_OLLAMA_RFQ_TIMEOUT_MS || timeoutMs > MAX_OLLAMA_RFQ_TIMEOUT_MS) {
+    throw new Error("OLLAMA_RFQ_TIMEOUT_MS must be an integer from 90000 to 600000");
+  }
+
+  const keepAlive = environment.OLLAMA_RFQ_KEEP_ALIVE?.trim() || DEFAULT_OLLAMA_RFQ_KEEP_ALIVE;
+  const keepAliveMs = parseKeepAliveMilliseconds(keepAlive);
+  if (keepAliveMs === undefined || keepAliveMs > MAX_OLLAMA_RFQ_KEEP_ALIVE_MS) {
+    throw new Error("OLLAMA_RFQ_KEEP_ALIVE must be 0 or a duration up to 10m, such as 2m");
+  }
+
+  return { numGpu: Number(rawNumGpu), numThread: Number(rawNumThread), timeoutMs, keepAlive };
+}
+
 function configuredClientUrl(environment: Environment): URL | undefined {
   const value = environment.CLIENT_URL?.trim();
   if (!value) return undefined;
@@ -41,6 +97,9 @@ export function getTrustProxyHops(environment: Environment = process.env): numbe
 export function validateRuntimeConfiguration(
   environment: Environment = process.env
 ): void {
+  // Validate optional AI tuning values in every environment so a typo cannot
+  // silently change the runtime options when AI is enabled.
+  getOllamaRfqRuntimeSettings(environment);
   if (environment.NODE_ENV !== "production") return;
 
   const problems: string[] = [];
