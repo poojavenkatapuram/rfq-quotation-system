@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: forgeflow-api
+    runtime: node
+    rootDir: server
+    region: singapore
+    plan: 0.5c-1g
+    autoDeployTrigger: off
+    buildCommand: npm ci && npx prisma generate && npm run build
+    preDeployCommand: npx prisma migrate deploy
+    startCommand: npm start
+    healthCheckPath: /api/health/database
+    disk:
+      name: rfq-documents
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CLIENT_URL
+        sync: false
+      - key: TRUST_PROXY_HOPS
+        value: "1"
+      - key: RFQ_DOCUMENT_STORAGE_DIR
+        value: /var/data/rfq-documents
+      - key: LOCAL_AI_ENABLED
+        value: "false"
+
+  - type: web
+    name: forgeflow-frontend
+    runtime: static
+    autoDeployTrigger: off
+    buildCommand: npm ci --prefix client && npm run build --prefix client
+    staticPublishPath: client/dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false

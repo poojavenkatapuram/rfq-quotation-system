@@ -42,6 +42,8 @@ The application does not send quotations by email or synchronize mailboxes. The 
 - A private, writable directory for uploaded RFQ documents.
 - Optional: a locally installed Ollama model for model-assisted extraction. See [AI intake limitations](#ai-assisted-intake-and-routing).
 
+For hosted deployment, use the [deployment quickstart](docs/deployment.md). The checked-in Render template is not a live deployment and requires account-owned environment configuration, a new hosted database, and approval of any public exposure or paid resources.
+
 ## Local setup
 
 Use a new, dedicated local development database. Do not point local setup at a database containing business records. If your chosen database name already exists, stop and verify its owner and contents instead of reusing it blindly.
