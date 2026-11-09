@@ -11,13 +11,18 @@ import {
   type OllamaInferenceMetrics,
 } from "../services/ollama-rfq-extraction.service.js";
 import { ExtractionFieldReviewStatus, ExtractionStatus } from "@prisma/client";
-import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { assertSafeXlsxArchive } from "../services/xlsx-archive-validation.service.js";
 import type { SupportedDocumentType } from "../services/rfq-document-extraction.service.js";
 import { isNumericRfqField, normalizeReviewedNumber } from "../services/rfq-field-validation.js";
+import {
+  deleteStoredDocument,
+  getDocumentStorageDirectory,
+  retrieveDocument,
+  storeDocument,
+} from "../services/document-storage.service.js";
 
 type UploadRequest = AuthenticatedRequest & {
   file?: Express.Multer.File;
@@ -27,19 +32,7 @@ type UploadRequest = AuthenticatedRequest & {
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const EXTRACTION_FAILURE_MESSAGE = "Unable to extract document content";
 
-const DEFAULT_STORAGE_DIRECTORY = path.resolve(
-  process.cwd(),
-  "storage",
-  "rfq-documents"
-);
-
-export function getDocumentStorageDirectory(): string {
-  const configuredDirectory = process.env.RFQ_DOCUMENT_STORAGE_DIR?.trim();
-
-  return configuredDirectory
-    ? path.resolve(configuredDirectory)
-    : DEFAULT_STORAGE_DIRECTORY;
-}
+export { getDocumentStorageDirectory } from "../services/document-storage.service.js";
 
 function isLocalAiEnabled(): boolean {
   const configuredValue = process.env.LOCAL_AI_ENABLED?.trim().toLowerCase();
@@ -323,13 +316,7 @@ async function processDocumentUploadOnce(
     const safeFileName =
       randomUUID() + "." + validation.documentType.toLowerCase();
 
-    const storageDirectory = getDocumentStorageDirectory();
-    await mkdir(storageDirectory, { recursive: true, mode: 0o700 });
-    storedFilePath = path.join(storageDirectory, safeFileName);
-    await writeFile(storedFilePath, file.buffer, {
-      flag: "wx",
-      mode: 0o600,
-    });
+    storedFilePath = await storeDocument(safeFileName, file.mimetype, file.buffer);
 
     const attachmentAndJob = await prisma.$transaction(async (tx) => {
       const attachment = await tx.attachment.create({
@@ -397,7 +384,7 @@ async function processDocumentUploadOnce(
     };
   } catch (error) {
     if (storedFilePath && !persisted) {
-      await unlink(storedFilePath).catch(() => undefined);
+      await deleteStoredDocument(storedFilePath).catch(() => undefined);
     }
 
     console.error("Document upload error", { name: errorName(error) });
@@ -569,7 +556,7 @@ export const retryExtractionJob = async (
     const extension = path.extname(job.attachment.fileName || "").toLowerCase();
     const documentType: SupportedDocumentType = job.attachment.mimeType === "application/pdf" || extension === ".pdf"
       ? "PDF" : job.attachment.mimeType === "message/rfc822" || extension === ".eml" ? "EML" : "XLSX";
-    const buffer = await readFile(job.attachment.storagePath);
+    const buffer = await retrieveDocument(job.attachment.storagePath);
 
     const claimed = await prisma.$transaction(async (tx) => {
       const claim = await tx.extractionJob.updateMany({

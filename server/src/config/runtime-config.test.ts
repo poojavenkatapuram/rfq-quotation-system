@@ -107,6 +107,33 @@ describe("runtime configuration", () => {
     })).not.toThrow();
   });
 
+  it("accepts private R2 storage without requiring a local filesystem directory", () => {
+    expect(() => validateRuntimeConfiguration({
+      ...productionEnvironment,
+      RFQ_DOCUMENT_STORAGE_DIR: "",
+      RFQ_DOCUMENT_STORAGE_PROVIDER: "r2",
+      R2_ACCOUNT_ID: "a".repeat(32),
+      R2_BUCKET_NAME: "forgeflow-private-docs",
+      R2_ACCESS_KEY_ID: "test-access-key",
+      R2_SECRET_ACCESS_KEY: "test-secret-key",
+    })).not.toThrow();
+  });
+
+  it("rejects incomplete private R2 storage configuration", () => {
+    expect(() => validateRuntimeConfiguration({
+      ...productionEnvironment,
+      RFQ_DOCUMENT_STORAGE_PROVIDER: "r2",
+      R2_BUCKET_NAME: "forgeflow-private-docs",
+    })).toThrow("R2_ACCOUNT_ID");
+  });
+
+  it("rejects unknown document storage providers", () => {
+    expect(() => validateRuntimeConfiguration({
+      ...productionEnvironment,
+      RFQ_DOCUMENT_STORAGE_PROVIDER: "public-url",
+    })).toThrow("RFQ_DOCUMENT_STORAGE_PROVIDER");
+  });
+
   it.each([
     ["OLLAMA_RFQ_NUM_GPU", "-1"],
     ["OLLAMA_RFQ_NUM_GPU", "1.5"],

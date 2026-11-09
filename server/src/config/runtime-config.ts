@@ -1,4 +1,5 @@
 import path from "node:path";
+import { validateR2StorageConfiguration } from "../services/document-storage.service.js";
 
 type Environment = NodeJS.ProcessEnv;
 
@@ -130,6 +131,7 @@ export function validateRuntimeConfiguration(
   const databaseUrl = environment.DATABASE_URL?.trim();
   const jwtSecret = environment.JWT_SECRET?.trim();
   const storageDirectory = environment.RFQ_DOCUMENT_STORAGE_DIR?.trim();
+  const storageProvider = environment.RFQ_DOCUMENT_STORAGE_PROVIDER?.trim().toLowerCase() || "local";
   const clientUrl = configuredClientUrl(environment);
   const localAiEnabled = environment.LOCAL_AI_ENABLED?.trim().toLowerCase();
   const ollamaBaseUrl = getOllamaRfqBaseUrl(environment);
@@ -142,8 +144,12 @@ export function validateRuntimeConfiguration(
   if (!jwtSecret || jwtSecret.length < 32) {
     problems.push("JWT_SECRET must be at least 32 characters");
   }
-  if (!storageDirectory || !path.isAbsolute(storageDirectory)) {
-    problems.push("RFQ_DOCUMENT_STORAGE_DIR must be an absolute path");
+  if (storageProvider !== "local" && storageProvider !== "r2") {
+    problems.push("RFQ_DOCUMENT_STORAGE_PROVIDER must be local or r2");
+  } else if (storageProvider === "local" && (!storageDirectory || !path.isAbsolute(storageDirectory))) {
+    problems.push("RFQ_DOCUMENT_STORAGE_DIR must be an absolute path when local document storage is selected");
+  } else if (storageProvider === "r2") {
+    problems.push(...validateR2StorageConfiguration(environment));
   }
   if (!clientUrl || clientUrl.protocol !== "https:") {
     problems.push("CLIENT_URL must be a valid HTTPS origin");
